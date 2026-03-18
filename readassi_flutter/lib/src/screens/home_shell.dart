@@ -18,10 +18,7 @@ class _HomeShellState extends State<HomeShell> {
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: [
-          HomeScreen(openLibrary: () => setState(() => _currentIndex = 1)),
-          const SelectBookScreen(),
-        ],
+        children: const [HomeScreen(), SelectBookScreen()],
       ),
       bottomNavigationBar: NavigationBar(
         backgroundColor: const Color(0xFFFDFBF7),
