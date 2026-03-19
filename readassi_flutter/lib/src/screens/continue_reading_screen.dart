@@ -26,7 +26,7 @@ class _ContinueReadingScreenState extends State<ContinueReadingScreen> {
       backgroundColor: const Color(0xFFFDFBF7),
       appBar: AppBar(
         backgroundColor: const Color(0xFFFDFBF7),
-        title: const Text('이어서 읽을 책'),
+        title: const Text('이어 읽을 책'),
       ),
       body: SafeArea(
         top: false,
@@ -34,7 +34,7 @@ class _ContinueReadingScreenState extends State<ContinueReadingScreen> {
           padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
           children: [
             Text(
-              '이전에 읽던 책을 골라서 바로 다음 스캔으로 이어갑니다.',
+              '이전에 읽던 책을 골라서 바로 다음 스캔 기록으로 이어갑니다.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: const Color(0xFF7D746C),
                 height: 1.5,
@@ -46,7 +46,7 @@ class _ContinueReadingScreenState extends State<ContinueReadingScreen> {
                 Expanded(
                   child: TextField(
                     decoration: InputDecoration(
-                      hintText: '책 제목이나 저자 검색',
+                      hintText: '책 제목이나 저자를 검색하세요',
                       prefixIcon: const Icon(Icons.search_rounded),
                       filled: true,
                       fillColor: Colors.white,
@@ -72,11 +72,11 @@ class _ContinueReadingScreenState extends State<ContinueReadingScreen> {
                     ),
                     PopupMenuItem(
                       value: ContinueReadingSortType.title,
-                      child: Text('이름순'),
+                      child: Text('제목순'),
                     ),
                     PopupMenuItem(
                       value: ContinueReadingSortType.progress,
-                      child: Text('진행도순'),
+                      child: Text('진행순'),
                     ),
                   ],
                   child: Container(

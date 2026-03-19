@@ -61,8 +61,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
                 children: [
                   _MenuCard(
-                    title: '새로운 책 읽기',
-                    description: '새로운 책을 카메라로 스캔하여 기록을 시작합니다.',
+                    title: '새로 책 읽기',
+                    description: '새로운 책을 카메라로 스캔하고 분석 기록을 시작합니다.',
                     icon: Icons.add,
                     accent: const Color(0xFFFFF0D9),
                     onTap: () async {
@@ -78,8 +78,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 18),
                   _MenuCard(
-                    title: '이어서 읽기',
-                    description: '이전에 읽던 책을 선택해 이어서 스캔합니다.',
+                    title: '이어 읽기',
+                    description: '이전에 읽던 책을 선택해서 다음 기록을 이어갑니다.',
                     icon: Icons.history_rounded,
                     accent: const Color(0xFFF1ECE7),
                     muted: true,

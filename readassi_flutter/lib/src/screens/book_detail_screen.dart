@@ -1,7 +1,8 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../app_state.dart';
 import '../models/book.dart';
+import '../services/claude_service.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/chat_bubble.dart';
 
@@ -17,10 +18,12 @@ class BookDetailScreen extends StatefulWidget {
 class _BookDetailScreenState extends State<BookDetailScreen> {
   BookDetailTab _activeTab = BookDetailTab.summary;
   final TextEditingController _controller = TextEditingController();
+  final ClaudeService _claudeService = ClaudeService();
+  bool _isSending = false;
   final List<_ChatMessage> _messages = [
     const _ChatMessage(
       role: ChatRole.assistant,
-      content: '안녕하세요. 이 책의 이야기와 등장인물, 관계를 바탕으로 편하게 질문하실 수 있어요.',
+      content: '안녕하세요. 이 책의 요약과 등장인물, 관계를 바탕으로 질문하실 수 있어요.',
     ),
   ];
 
@@ -242,8 +245,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               .toList(),
         );
       case BookDetailTab.map:
-        if (book.characters.length < 3) {
-          return const _NoticeCard(message: '관계를 그리기에는 인물 정보가 아직 부족합니다.');
+        if (book.characters.length < 3 || book.relationships.length < 3) {
+          return const _NoticeCard(message: '관계 지도를 그리기에는 인물 정보가 아직 부족합니다.');
         }
         return Card(
           margin: EdgeInsets.zero,
@@ -318,7 +321,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                         minLines: 1,
                         maxLines: 3,
                         decoration: const InputDecoration(
-                          hintText: '질문을 입력하세요',
+                          hintText: '질문을 입력해주세요.',
                           filled: true,
                           fillColor: Color(0xFFF9F6F1),
                           border: OutlineInputBorder(
@@ -330,7 +333,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     ),
                     const SizedBox(width: 10),
                     FilledButton(
-                      onPressed: () => _sendMessage(book),
+                      onPressed: _isSending
+                          ? null
+                          : () => _sendMessageWithClaude(book),
                       style: FilledButton.styleFrom(
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(18),
@@ -348,22 +353,36 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     }
   }
 
-  void _sendMessage(Book book) {
+  Future<void> _sendMessageWithClaude(Book book) async {
     final text = _controller.text.trim();
     if (text.isEmpty) {
       return;
     }
 
     setState(() {
+      _isSending = true;
       _messages.add(_ChatMessage(role: ChatRole.user, content: text));
+      _controller.clear();
+    });
+
+    final answer = await _claudeService.answerBookQuestion(
+      book: book,
+      question: text,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
       _messages.add(
         _ChatMessage(
           role: ChatRole.assistant,
-          content:
-              '"${book.title}"에서는 긴장감과 상징이 함께 쌓이고 있어요. 지금 읽은 부분 기준으로 보면 인물의 선택이 이후 갈등을 키우는 방향으로 작동합니다.',
+          content: answer ??
+              'Claude API가 아직 연결되지 않았거나 응답을 받지 못했습니다. API를 연결하면 더 자연스러운 답변을 받을 수 있어요.',
         ),
       );
-      _controller.clear();
+      _isSending = false;
     });
   }
 }

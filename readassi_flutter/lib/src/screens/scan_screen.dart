@@ -1,10 +1,16 @@
+﻿
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
+import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 import '../app_state.dart';
 import '../models/book.dart';
+import '../services/claude_service.dart';
 import '../widgets/chat_bubble.dart';
 import 'book_detail_screen.dart';
 
@@ -18,35 +24,58 @@ class ScanScreen extends StatefulWidget {
 }
 
 class _ScanScreenState extends State<ScanScreen> {
+  static const _scanInterval = Duration(milliseconds: 1400);
+
+  final TextEditingController _chatController = TextEditingController();
+  final ClaudeService _claudeService = ClaudeService();
+
+  CameraController? _cameraController;
+  TextRecognizer? _textRecognizer;
+  Timer? _scanTimer;
+  Timer? _tooltipTimer;
+
+  bool _isCameraReady = false;
+  bool _isInitializingCamera = true;
   bool _isScanning = false;
+  bool _isProcessingFrame = false;
   bool _showTooltip = true;
   bool _hasData = false;
-  ScanTab _activeTab = ScanTab.text;
 
+  String? _cameraError;
   String _extractedText = '';
   String _summary = '';
   List<String> _keywords = [];
   List<_SimpleCharacter> _characters = [];
   final List<_ChatEntry> _chatMessages = [];
-  final TextEditingController _chatController = TextEditingController();
-  final List<Timer> _timers = [];
+  ScanTab _activeTab = ScanTab.text;
+
+  bool get _supportsLiveCamera {
+    if (kIsWeb) {
+      return false;
+    }
+
+    return defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+  }
 
   @override
   void initState() {
     super.initState();
-    Timer(const Duration(seconds: 5), () {
+    _tooltipTimer = Timer(const Duration(seconds: 5), () {
       if (mounted) {
         setState(() => _showTooltip = false);
       }
     });
+    unawaited(_initializeCamera());
   }
 
   @override
   void dispose() {
-    for (final timer in _timers) {
-      timer.cancel();
-    }
+    _scanTimer?.cancel();
+    _tooltipTimer?.cancel();
     _chatController.dispose();
+    unawaited(_textRecognizer?.close());
+    unawaited(_cameraController?.dispose());
     super.dispose();
   }
 
@@ -79,82 +108,9 @@ class _ScanScreenState extends State<ScanScreen> {
                   const SizedBox(height: 120),
                   Expanded(
                     child: Center(
-                      child: Container(
-                        width: MediaQuery.of(context).size.width * 0.76,
-                        constraints: const BoxConstraints(maxWidth: 340),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(28),
-                          border: Border.all(
-                            color: _isScanning
-                                ? const Color(0xFFFFC47B)
-                                : const Color(0xFF5A4F46),
-                            width: 2,
-                          ),
-                          boxShadow: _isScanning
-                              ? [
-                                  BoxShadow(
-                                    color: const Color(
-                                      0xFFFFB55D,
-                                    ).withValues(alpha: 0.25),
-                                    blurRadius: 40,
-                                    spreadRadius: 10,
-                                  ),
-                                ]
-                              : null,
-                        ),
-                        child: AspectRatio(
-                          aspectRatio: 3 / 4,
-                          child: Stack(
-                            children: [
-                              Positioned.fill(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(26),
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                      colors: [
-                                        Colors.white.withValues(alpha: 0.05),
-                                        Colors.white.withValues(alpha: 0.02),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              if (_isScanning)
-                                Positioned(
-                                  top: 0,
-                                  left: 0,
-                                  right: 0,
-                                  child: TweenAnimationBuilder<double>(
-                                    tween: Tween(begin: -1, end: 1),
-                                    duration: const Duration(seconds: 2),
-                                    curve: Curves.easeInOut,
-                                    builder: (context, value, child) {
-                                      return Transform.translate(
-                                        offset: Offset(0, value * 260),
-                                        child: child,
-                                      );
-                                    },
-                                    child: Container(
-                                      height: 4,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFFC47B),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: const Color(
-                                              0xFFFFC47B,
-                                            ).withValues(alpha: 0.9),
-                                            blurRadius: 18,
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
+                      child: _CameraFrame(
+                        isScanning: _isScanning,
+                        child: _buildCameraArea(),
                       ),
                     ),
                   ),
@@ -205,7 +161,7 @@ class _ScanScreenState extends State<ScanScreen> {
                       border: Border.all(color: const Color(0xFF4C443D)),
                     ),
                     child: const Text(
-                      '카메라 영역에 책 페이지를 맞춘 뒤\n아래 버튼으로 스캔을 시작하세요.',
+                      '카메라 화면에 책 페이지를 맞춘 뒤\n아래 버튼으로 실시간 스캔을 시작해보세요.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xFFF3EDE4), height: 1.5),
                     ),
@@ -250,8 +206,7 @@ class _ScanScreenState extends State<ScanScreen> {
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color:
-                                    (_isScanning
+                                color: (_isScanning
                                             ? const Color(0xFFFFB55D)
                                             : Colors.black)
                                         .withValues(alpha: 0.18),
@@ -285,7 +240,9 @@ class _ScanScreenState extends State<ScanScreen> {
                       ),
                       const SizedBox(height: 14),
                       Text(
-                        _isScanning ? '인식 중' : (_hasData ? '다시 스캔하기' : '스캔 시작'),
+                        _isScanning
+                            ? '실시간 인식 중'
+                            : (_hasData ? '다시 스캔하기' : '스캔 시작'),
                         style: const TextStyle(
                           color: Color(0xFFBFB2A2),
                           fontWeight: FontWeight.w600,
@@ -302,24 +259,160 @@ class _ScanScreenState extends State<ScanScreen> {
     );
   }
 
-  void _toggleScan() {
-    setState(() {
-      _isScanning = !_isScanning;
-      if (_isScanning) {
-        _startMockScan();
-      } else {
-        _ensureResultData();
-      }
-    });
+  Widget _buildCameraArea() {
+    final preview = _cameraController;
+
+    if (!_supportsLiveCamera) {
+      return const _CameraMessage(
+        icon: Icons.phone_android_rounded,
+        title: '모바일 카메라가 필요한 기능입니다',
+        description: '이 기능은 Android 또는 iPhone에서 실제 카메라를 사용해 스캔합니다.',
+      );
+    }
+
+    if (_isInitializingCamera) {
+      return const _CameraMessage(
+        icon: Icons.camera_alt_outlined,
+        title: '카메라 준비 중',
+        description: '잠시만 기다리면 실시간 스캔 화면이 열립니다.',
+        loading: true,
+      );
+    }
+
+    if (_cameraError != null) {
+      return _CameraMessage(
+        icon: Icons.error_outline_rounded,
+        title: '카메라를 열 수 없습니다',
+        description: _cameraError!,
+      );
+    }
+
+    if (!_isCameraReady || preview == null || !preview.value.isInitialized) {
+      return const _CameraMessage(
+        icon: Icons.no_photography_outlined,
+        title: '카메라를 사용할 수 없습니다',
+        description: '기기 권한 또는 카메라 상태를 확인해주세요.',
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(26),
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: preview.value.previewSize?.height ?? 300,
+              height: preview.value.previewSize?.width ?? 400,
+              child: CameraPreview(preview),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(26),
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.12),
+                  Colors.transparent,
+                  Colors.black.withValues(alpha: 0.24),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Center(
+          child: Container(
+            width: 220,
+            height: 300,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                color: const Color(0xFFFFE2B8),
+                width: 2,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
-  void _startMockScan() {
-    for (final timer in _timers) {
-      timer.cancel();
+  Future<void> _initializeCamera() async {
+    if (!_supportsLiveCamera) {
+      if (mounted) {
+        setState(() {
+          _isInitializingCamera = false;
+          _cameraError = '현재 기기에서는 실시간 카메라 스캔을 사용할 수 없습니다.';
+        });
+      }
+      return;
     }
-    _timers.clear();
+
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        throw Exception('사용 가능한 카메라가 없습니다.');
+      }
+
+      final selectedCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+
+      final controller = CameraController(
+        selectedCamera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
+
+      await controller.initialize();
+      _textRecognizer ??= TextRecognizer(
+        script: TextRecognitionScript.korean,
+      );
+
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+
+      setState(() {
+        _cameraController = controller;
+        _isCameraReady = true;
+        _isInitializingCamera = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isInitializingCamera = false;
+        _cameraError = '카메라 초기화에 실패했습니다. 권한을 확인해주세요.\n$error';
+      });
+    }
+  }
+
+  Future<void> _toggleScan() async {
+    if (_isScanning) {
+      _stopLiveScan();
+      await _ensureResultData();
+      return;
+    }
+
+    if (!_isCameraReady || _cameraController == null) {
+      setState(() {
+        _cameraError = '카메라 준비가 끝난 뒤 다시 시도해주세요.';
+      });
+      return;
+    }
 
     setState(() {
+      _isScanning = true;
       _hasData = true;
       _activeTab = ScanTab.text;
       _extractedText = '';
@@ -329,107 +422,205 @@ class _ScanScreenState extends State<ScanScreen> {
       _chatMessages.clear();
     });
 
-    final steps = <({Duration delay, VoidCallback action})>[
-      (
-        delay: const Duration(seconds: 1),
-        action: () => setState(() {
-          _extractedText += '손자병법 제1편 시계(始計)... ';
-        }),
-      ),
-      (
-        delay: const Duration(seconds: 3),
-        action: () => setState(() {
-          _extractedText += '병자 국지대사(兵者 國之大事), 사생지지(死生之地), 존망지도(存亡之道), 불가불찰야. ';
-        }),
-      ),
-      (
-        delay: const Duration(seconds: 5),
-        action: () => setState(() {
-          _extractedText +=
-              '전쟁은 국가의 중대사이다. 백성의 생사와 국가의 존망이 달린 문제이므로 깊이 살피지 않을 수 없다.';
-        }),
-      ),
-      (
-        delay: const Duration(seconds: 6),
-        action: () => setState(() {
-          _summary =
-              '이 구절은 손자병법의 핵심 사상인 신중한 전쟁관을 담고 있습니다. 전쟁이 국가와 백성의 운명을 좌우하는 중대사이므로, 철저한 계산과 준비 없이는 섣불리 움직여선 안 된다는 메시지입니다.';
-          _keywords = ['신중함', '전략', '국가의 중대사', '철저한 준비'];
-        }),
-      ),
-      (
-        delay: const Duration(seconds: 7),
-        action: () => setState(() {
-          _characters = const [
-            _SimpleCharacter(
-              name: '손무 (孫武)',
-              description: '춘추시대 오나라의 장군. 싸우지 않고 이기는 것을 최선으로 여긴 전략가입니다.',
-            ),
-            _SimpleCharacter(
-              name: '합려 (闔閭)',
-              description: '오나라의 왕. 손무를 기용해 강국으로 도약하려 한 인물입니다.',
-            ),
-          ];
-        }),
-      ),
-      (
-        delay: const Duration(seconds: 8),
-        action: () => setState(() {
-          _chatMessages.add(
-            const _ChatEntry(
-              role: ChatRole.assistant,
-              content: '손자병법의 시계 편을 읽고 계시군요. 이 부분에서 더 궁금한 점이 있으신가요?',
-            ),
-          );
-        }),
-      ),
-    ];
+    await _captureAndRecognizeText();
+    _scanTimer?.cancel();
+    _scanTimer = Timer.periodic(_scanInterval, (_) {
+      unawaited(_captureAndRecognizeText());
+    });
+  }
 
-    for (final step in steps) {
-      _timers.add(
-        Timer(step.delay, () {
-          if (mounted && _isScanning) {
-            step.action();
-          }
-        }),
-      );
+  void _stopLiveScan() {
+    _scanTimer?.cancel();
+    setState(() => _isScanning = false);
+  }
+
+  Future<void> _captureAndRecognizeText() async {
+    final controller = _cameraController;
+    final textRecognizer = _textRecognizer;
+
+    if (!_isScanning ||
+        _isProcessingFrame ||
+        controller == null ||
+        textRecognizer == null ||
+        !controller.value.isInitialized ||
+        controller.value.isTakingPicture) {
+      return;
+    }
+
+    _isProcessingFrame = true;
+    XFile? capturedImage;
+
+    try {
+      capturedImage = await controller.takePicture();
+      final inputImage = InputImage.fromFilePath(capturedImage.path);
+      final recognizedText = await textRecognizer.processImage(inputImage);
+
+      if (!mounted) {
+        return;
+      }
+
+      final normalizedText = recognizedText.text.trim();
+      if (normalizedText.isEmpty) {
+        return;
+      }
+
+      setState(() {
+        _extractedText = _mergeRecognizedText(_extractedText, normalizedText);
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _cameraError = '실시간 OCR 처리 중 문제가 발생했습니다.\n$error';
+      });
+    } finally {
+      _isProcessingFrame = false;
+      if (capturedImage != null) {
+        final file = File(capturedImage.path);
+        if (await file.exists()) {
+          await file.delete();
+        }
+      }
     }
   }
 
-  void _ensureResultData() {
-    if (!_hasData || _extractedText.isEmpty) {
+  String _mergeRecognizedText(String current, String next) {
+    if (current.isEmpty) {
+      return next;
+    }
+    if (current.contains(next)) {
+      return current;
+    }
+    if (next.contains(current)) {
+      return next;
+    }
+    if (current.length > 80 && next.length > 80) {
+      final currentTail = current.substring(max(0, current.length - 80));
+      if (next.startsWith(currentTail)) {
+        return current + next.substring(currentTail.length);
+      }
+    }
+    return '$current\n\n$next';
+  }
+
+  Future<void> _ensureResultData() async {
+    if (!_hasData || _extractedText.trim().isEmpty) {
       return;
     }
 
     setState(() {
       if (_summary.isEmpty) {
-        _summary =
-            '이 구절은 손자병법의 핵심 사상인 신중한 전쟁관을 담고 있습니다. 전쟁이 국가와 백성의 운명을 좌우하는 중대사이므로, 철저한 계산과 준비 없이는 섣불리 움직여선 안 된다는 메시지입니다.';
+        _summary = _buildSimpleSummary(_extractedText);
       }
       if (_keywords.isEmpty) {
-        _keywords = ['신중함', '전략', '국가의 중대사', '철저한 준비'];
+        _keywords = _extractSimpleKeywords(_extractedText);
       }
       if (_characters.isEmpty) {
-        _characters = const [
-          _SimpleCharacter(
-            name: '손무 (孫武)',
-            description: '춘추시대 오나라의 장군. 싸우지 않고 이기는 것을 최선으로 여긴 전략가입니다.',
-          ),
-          _SimpleCharacter(
-            name: '합려 (闔閭)',
-            description: '오나라의 왕. 손무를 기용해 강국으로 도약하려 한 인물입니다.',
-          ),
-        ];
+        _characters = _extractSimpleCharacters(_extractedText);
       }
       if (_chatMessages.isEmpty) {
         _chatMessages.add(
           const _ChatEntry(
             role: ChatRole.assistant,
-            content: '손자병법의 시계 편을 읽고 계시군요. 이 부분에서 더 궁금한 점이 있으신가요?',
+            content: '실시간 스캔이 끝났습니다. 읽은 내용에서 궁금한 점을 질문해보세요.',
           ),
         );
       }
     });
+
+    final analysis = await _claudeService.analyzeScanText(_extractedText);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      if (analysis != null) {
+        if (analysis.summary.isNotEmpty) {
+          _summary = analysis.summary;
+        }
+        if (analysis.keywords.isNotEmpty) {
+          _keywords = analysis.keywords;
+        }
+        if (analysis.characters.isNotEmpty) {
+          _characters = analysis.characters
+              .where((character) => character.name.isNotEmpty)
+              .map(
+                (character) => _SimpleCharacter(
+                  name: character.name,
+                  description: character.description.isEmpty
+                      ? 'Claude가 추출한 인물 후보입니다.'
+                      : character.description,
+                ),
+              )
+              .toList();
+        }
+      } else {
+        _chatMessages.add(
+          const _ChatEntry(
+            role: ChatRole.assistant,
+            content: 'Claude API가 아직 연결되지 않았거나 응답을 받지 못해 임시 분석 결과를 보여주고 있습니다.',
+          ),
+        );
+      }
+    });
+  }
+
+  String _buildSimpleSummary(String text) {
+    final collapsed = text.replaceAll('\n', ' ').trim();
+    if (collapsed.length <= 120) {
+      return collapsed;
+    }
+    return '${collapsed.substring(0, 120).trim()}...';
+  }
+
+  List<String> _extractSimpleKeywords(String text) {
+    final words = RegExp(r'[A-Za-z가-힣]{2,}')
+        .allMatches(text)
+        .map((match) => match.group(0)!)
+        .where(
+          (word) => !{
+            '그리고',
+            '하지만',
+            '그러나',
+            '입니다',
+            '있는',
+            '에서',
+            '으로',
+            '하면',
+            '그는',
+            '그녀',
+          }.contains(word),
+        )
+        .take(4)
+        .toList();
+
+    if (words.isEmpty) {
+      return ['실시간 스캔', 'OCR'];
+    }
+
+    return words.toSet().take(4).toList();
+  }
+
+  List<_SimpleCharacter> _extractSimpleCharacters(String text) {
+    final matches = RegExp(r'[가-힣]{2,4}')
+        .allMatches(text)
+        .map((match) => match.group(0)!)
+        .where(
+          (word) => word != '그리고' && word != '하지만' && word != '그러나',
+        )
+        .take(2)
+        .toList();
+
+    return matches
+        .map(
+          (name) => _SimpleCharacter(
+            name: name,
+            description: '스캔 텍스트에서 반복적으로 보인 이름 또는 주요 단어입니다.',
+          ),
+        )
+        .toList();
   }
 
   void _sendMessage() {
@@ -440,14 +631,53 @@ class _ScanScreenState extends State<ScanScreen> {
 
     setState(() {
       _chatMessages.add(_ChatEntry(role: ChatRole.user, content: text));
+      _chatController.clear();
+    });
+
+    unawaited(_answerScanQuestion(text));
+  }
+
+  Future<void> _answerScanQuestion(String question) async {
+    final temporaryBook = Book(
+      id: 'scan-preview',
+      title: '실시간 스캔 기록',
+      author: '저자 미상',
+      coverUrl:
+          'https://images.unsplash.com/photo-1604435062356-a880b007922c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080',
+      summary: _summary,
+      keywords: _keywords,
+      characters: _characters
+          .map(
+            (character) => Character(
+              id: character.name,
+              name: character.name,
+              role: '스캔 인물',
+              description: character.description,
+              imageUrl:
+                  'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080',
+            ),
+          )
+          .toList(),
+      relationships: const [],
+    );
+
+    final answer = await _claudeService.answerBookQuestion(
+      book: temporaryBook,
+      question: question,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
       _chatMessages.add(
-        const _ChatEntry(
+        _ChatEntry(
           role: ChatRole.assistant,
-          content:
-              '좋아요. 지금 문맥에서는 전쟁을 시작하기 전에 계산과 명분, 지형과 병력까지 함께 살피라는 뜻으로 읽을 수 있습니다.',
+          content: answer ??
+              'Claude API가 아직 연결되지 않았거나 응답을 받지 못했습니다. 나중에 API를 연결하면 더 정확한 답변을 받을 수 있습니다.',
         ),
       );
-      _chatController.clear();
     });
   }
 
@@ -463,8 +693,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
     final savedBook = Book(
       id: 'b${DateTime.now().millisecondsSinceEpoch}',
-      title: existingBook?.title ?? '손자병법',
-      author: existingBook?.author ?? '손무',
+      title: existingBook?.title ?? '실시간 스캔 기록',
+      author: existingBook?.author ?? '저자 미상',
       coverUrl:
           existingBook?.coverUrl ??
           'https://images.unsplash.com/photo-1604435062356-a880b007922c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxib29rJTIwY292ZXIlMjBteXN0ZXJ5fGVufDF8fHx8MTc3Mzc5NDUwM3ww&ixlib=rb-4.1.0&q=80&w=1080',
@@ -475,7 +705,7 @@ class _ScanScreenState extends State<ScanScreen> {
             (character) => Character(
               id: character.name,
               name: character.name,
-              role: '핵심 인물',
+              role: '스캔 인물',
               description: character.description,
               imageUrl:
                   'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080',
@@ -519,6 +749,147 @@ class _RoundIconButton extends StatelessWidget {
           shape: BoxShape.circle,
         ),
         child: Icon(icon, color: Colors.white),
+      ),
+    );
+  }
+}
+
+class _CameraFrame extends StatelessWidget {
+  const _CameraFrame({
+    required this.isScanning,
+    required this.child,
+  });
+
+  final bool isScanning;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: MediaQuery.of(context).size.width * 0.76,
+      constraints: const BoxConstraints(maxWidth: 340),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(
+          color: isScanning
+              ? const Color(0xFFFFC47B)
+              : const Color(0xFF5A4F46),
+          width: 2,
+        ),
+        boxShadow: isScanning
+            ? [
+                BoxShadow(
+                  color: const Color(0xFFFFB55D).withValues(alpha: 0.25),
+                  blurRadius: 40,
+                  spreadRadius: 10,
+                ),
+              ]
+            : null,
+      ),
+      child: AspectRatio(
+        aspectRatio: 3 / 4,
+        child: Stack(
+          children: [
+            Positioned.fill(child: child),
+            if (isScanning)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: -1, end: 1),
+                  duration: const Duration(seconds: 2),
+                  curve: Curves.easeInOut,
+                  builder: (context, value, scanLine) {
+                    return Transform.translate(
+                      offset: Offset(0, value * 260),
+                      child: scanLine,
+                    );
+                  },
+                  child: Container(
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFC47B),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFFFC47B).withValues(alpha: 0.9),
+                          blurRadius: 18,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CameraMessage extends StatelessWidget {
+  const _CameraMessage({
+    required this.icon,
+    required this.title,
+    required this.description,
+    this.loading = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(26),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Colors.white.withValues(alpha: 0.08),
+            Colors.white.withValues(alpha: 0.02),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (loading)
+                const SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                )
+              else
+                Icon(icon, color: const Color(0xFFFFD9AD), size: 34),
+              const SizedBox(height: 18),
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 10),
+              Text(
+                description,
+                style: const TextStyle(
+                  color: Color(0xFFD6C9BC),
+                  height: 1.5,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -575,14 +946,14 @@ class _ScanPanel extends StatelessWidget {
                   ),
                   _ScanTabChip(
                     icon: Icons.auto_awesome_rounded,
-                    label: 'AI 요약',
+                    label: '임시 요약',
                     selected: activeTab == ScanTab.summary,
                     disabled: isScanning,
                     onTap: () => onTabSelected(ScanTab.summary),
                   ),
                   _ScanTabChip(
                     icon: Icons.people_alt_outlined,
-                    label: '인물 정보',
+                    label: '인물 후보',
                     selected: activeTab == ScanTab.characters,
                     disabled: isScanning,
                     onTap: () => onTabSelected(ScanTab.characters),
@@ -612,7 +983,7 @@ class _ScanPanel extends StatelessWidget {
                   ),
                   SizedBox(width: 10),
                   Text(
-                    '텍스트를 인식하고 분석하고 있습니다...',
+                    '카메라 화면을 읽으면서 OCR 텍스트를 갱신하고 있습니다...',
                     style: TextStyle(
                       color: Color(0xFFA46728),
                       fontWeight: FontWeight.w600,
@@ -630,7 +1001,7 @@ class _ScanPanel extends StatelessWidget {
                     case ScanTab.text:
                       return Text(
                         extractedText.isEmpty
-                            ? '텍스트를 인식하고 있습니다...'
+                            ? '실시간 OCR 결과가 아직 없습니다.'
                             : extractedText,
                         style: Theme.of(
                           context,
@@ -638,7 +1009,7 @@ class _ScanPanel extends StatelessWidget {
                       );
                     case ScanTab.summary:
                       if (summary.isEmpty) {
-                        return const Text('텍스트가 충분히 쌓이면 AI 요약이 여기에 나타납니다.');
+                        return const Text('스캔을 멈추면 텍스트를 바탕으로 임시 요약을 보여줍니다.');
                       }
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -663,7 +1034,7 @@ class _ScanPanel extends StatelessWidget {
                       );
                     case ScanTab.characters:
                       if (characters.isEmpty) {
-                        return const Text('등장인물 정보가 아직 없습니다.');
+                        return const Text('인물 후보가 아직 없습니다.');
                       }
                       return Column(
                         children: characters
@@ -754,7 +1125,7 @@ class _ScanPanel extends StatelessWidget {
                                 child: TextField(
                                   controller: chatController,
                                   decoration: const InputDecoration(
-                                    hintText: '궁금한 점을 물어보세요',
+                                    hintText: '궁금한 점을 물어보세요.',
                                     filled: true,
                                     fillColor: Colors.white,
                                     border: OutlineInputBorder(
@@ -825,8 +1196,8 @@ class _ScanTabChip extends StatelessWidget {
     final textColor = disabled
         ? const Color(0xFFC6BBB0)
         : selected
-        ? const Color(0xFF8A4B17)
-        : const Color(0xFF6F675F);
+            ? const Color(0xFF8A4B17)
+            : const Color(0xFF6F675F);
 
     return Padding(
       padding: const EdgeInsets.only(right: 10),

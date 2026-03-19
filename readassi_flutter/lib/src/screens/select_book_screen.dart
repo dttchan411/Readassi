@@ -36,7 +36,7 @@ class _SelectBookScreenState extends State<SelectBookScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              '이전에 읽던 책을 다시 열고, 요약과 등장인물, 질문 기록을 이어볼 수 있습니다.',
+              '이전에 분석한 책을 다시 열고, 요약과 등장인물, 질문 기록을 이어서 볼 수 있습니다.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: const Color(0xFF7D746C),
                 height: 1.5,
@@ -74,11 +74,11 @@ class _SelectBookScreenState extends State<SelectBookScreen> {
                     ),
                     PopupMenuItem(
                       value: SelectBookSortType.title,
-                      child: Text('이름순'),
+                      child: Text('제목순'),
                     ),
                     PopupMenuItem(
                       value: SelectBookSortType.progress,
-                      child: Text('진행도순'),
+                      child: Text('진행순'),
                     ),
                   ],
                   child: Container(
