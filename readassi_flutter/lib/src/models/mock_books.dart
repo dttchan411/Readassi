@@ -51,8 +51,7 @@ const mockBooks = <Book>[
     author: '마리 엘렌',
     coverUrl:
         'https://images.unsplash.com/photo-1711185892188-13f35959d3ca?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxib29rJTIwY292ZXIlMjBmYW50YXN5fGVufDF8fHx8MTc3Mzc0OTQyOHww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral',
-    summary:
-        '마법과 기술의 경계에서 살아가는 주인공이 자신의 숨겨진 정체와 마주하며 성장하는 판타지 소설입니다.',
+    summary: '마법과 기술의 경계에서 살아가는 주인공이 자신의 숨겨진 정체와 마주하며 성장하는 판타지 소설입니다.',
     keywords: ['판타지', '마법', '정체성', '모험'],
     characters: [],
     relationships: [],
@@ -66,8 +65,7 @@ const mockBooks = <Book>[
     author: '에릭 머로',
     coverUrl:
         'https://images.unsplash.com/photo-1604435062356-a880b007922c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxib29rJTIwY292ZXIlMjBteXN0ZXJ5fGVufDF8fHx8MTc3Mzc5NDUwM3ww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral',
-    summary:
-        '형사가 미제 사건의 단서를 하나씩 모으며 조용하지만 집요하게 진실을 추적하는 미스터리 작품입니다.',
+    summary: '형사가 미제 사건의 단서를 하나씩 모으며 조용하지만 집요하게 진실을 추적하는 미스터리 작품입니다.',
     keywords: ['스릴러', '연쇄 사건', '추리', '미스터리'],
     characters: [],
     relationships: [],

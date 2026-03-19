@@ -114,7 +114,10 @@ class Book {
           .map((keyword) => keyword as String)
           .toList(),
       characters: (json['characters'] as List<dynamic>? ?? const [])
-          .map((character) => Character.fromJson(character as Map<String, dynamic>))
+          .map(
+            (character) =>
+                Character.fromJson(character as Map<String, dynamic>),
+          )
           .toList(),
       relationships: (json['relationships'] as List<dynamic>? ?? const [])
           .map(

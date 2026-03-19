@@ -1,6 +1,4 @@
-﻿
 import 'dart:async';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
@@ -31,8 +29,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
   CameraController? _cameraController;
   TextRecognizer? _textRecognizer;
-  Timer? _scanTimer;
   Timer? _tooltipTimer;
+  DateTime _lastProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool _isCameraReady = false;
   bool _isInitializingCamera = true;
@@ -71,10 +69,12 @@ class _ScanScreenState extends State<ScanScreen> {
 
   @override
   void dispose() {
-    _scanTimer?.cancel();
     _tooltipTimer?.cancel();
     _chatController.dispose();
     unawaited(_textRecognizer?.close());
+    if (_cameraController?.value.isStreamingImages ?? false) {
+      unawaited(_cameraController?.stopImageStream());
+    }
     unawaited(_cameraController?.dispose());
     super.dispose();
   }
@@ -206,7 +206,8 @@ class _ScanScreenState extends State<ScanScreen> {
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color: (_isScanning
+                                color:
+                                    (_isScanning
                                             ? const Color(0xFFFFB55D)
                                             : Colors.black)
                                         .withValues(alpha: 0.18),
@@ -331,10 +332,7 @@ class _ScanScreenState extends State<ScanScreen> {
             height: 300,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: const Color(0xFFFFE2B8),
-                width: 2,
-              ),
+              border: Border.all(color: const Color(0xFFFFE2B8), width: 2),
             ),
           ),
         ),
@@ -368,12 +366,11 @@ class _ScanScreenState extends State<ScanScreen> {
         selectedCamera,
         ResolutionPreset.medium,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
       await controller.initialize();
-      _textRecognizer ??= TextRecognizer(
-        script: TextRecognitionScript.korean,
-      );
+      _textRecognizer ??= TextRecognizer(script: TextRecognitionScript.korean);
 
       if (!mounted) {
         await controller.dispose();
@@ -399,7 +396,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
   Future<void> _toggleScan() async {
     if (_isScanning) {
-      _stopLiveScan();
+      await _stopLiveScan();
       await _ensureResultData();
       return;
     }
@@ -422,37 +419,69 @@ class _ScanScreenState extends State<ScanScreen> {
       _chatMessages.clear();
     });
 
-    await _captureAndRecognizeText();
-    _scanTimer?.cancel();
-    _scanTimer = Timer.periodic(_scanInterval, (_) {
-      unawaited(_captureAndRecognizeText());
-    });
+    final controller = _cameraController;
+    if (controller == null) {
+      return;
+    }
+
+    try {
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+
+      await controller.startImageStream((image) {
+        unawaited(_processCameraImage(image));
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isScanning = false;
+        _cameraError = '실시간 스캔 시작에 실패했습니다.\n$error';
+      });
+    }
   }
 
-  void _stopLiveScan() {
-    _scanTimer?.cancel();
-    setState(() => _isScanning = false);
+  Future<void> _stopLiveScan() async {
+    final controller = _cameraController;
+    if (controller != null && controller.value.isStreamingImages) {
+      try {
+        await controller.stopImageStream();
+      } catch (_) {
+        // If the stream is already stopping, we can safely ignore the error.
+      }
+    }
+
+    if (mounted) {
+      setState(() => _isScanning = false);
+    }
   }
 
-  Future<void> _captureAndRecognizeText() async {
+  Future<void> _processCameraImage(CameraImage image) async {
     final controller = _cameraController;
     final textRecognizer = _textRecognizer;
+    final now = DateTime.now();
 
     if (!_isScanning ||
         _isProcessingFrame ||
         controller == null ||
         textRecognizer == null ||
         !controller.value.isInitialized ||
-        controller.value.isTakingPicture) {
+        now.difference(_lastProcessedAt) < _scanInterval) {
       return;
     }
 
     _isProcessingFrame = true;
-    XFile? capturedImage;
+    _lastProcessedAt = now;
 
     try {
-      capturedImage = await controller.takePicture();
-      final inputImage = InputImage.fromFilePath(capturedImage.path);
+      final inputImage = _inputImageFromCameraImage(image, controller);
+      if (inputImage == null) {
+        return;
+      }
+
       final recognizedText = await textRecognizer.processImage(inputImage);
 
       if (!mounted) {
@@ -477,12 +506,56 @@ class _ScanScreenState extends State<ScanScreen> {
       });
     } finally {
       _isProcessingFrame = false;
-      if (capturedImage != null) {
-        final file = File(capturedImage.path);
-        if (await file.exists()) {
-          await file.delete();
-        }
-      }
+    }
+  }
+
+  InputImage? _inputImageFromCameraImage(
+    CameraImage image,
+    CameraController controller,
+  ) {
+    final format = InputImageFormatValue.fromRawValue(image.format.raw);
+    if (format == null) {
+      return null;
+    }
+
+    final rotation = _rotationFromSensor(
+      controller.description.sensorOrientation,
+    );
+    if (rotation == null) {
+      return null;
+    }
+
+    final bytes = _concatenatePlanes(image.planes);
+    final metadata = InputImageMetadata(
+      size: Size(image.width.toDouble(), image.height.toDouble()),
+      rotation: rotation,
+      format: format,
+      bytesPerRow: image.planes.first.bytesPerRow,
+    );
+
+    return InputImage.fromBytes(bytes: bytes, metadata: metadata);
+  }
+
+  Uint8List _concatenatePlanes(List<Plane> planes) {
+    final writeBuffer = WriteBuffer();
+    for (final plane in planes) {
+      writeBuffer.putUint8List(plane.bytes);
+    }
+    return writeBuffer.done().buffer.asUint8List();
+  }
+
+  InputImageRotation? _rotationFromSensor(int sensorOrientation) {
+    switch (sensorOrientation) {
+      case 0:
+        return InputImageRotation.rotation0deg;
+      case 90:
+        return InputImageRotation.rotation90deg;
+      case 180:
+        return InputImageRotation.rotation180deg;
+      case 270:
+        return InputImageRotation.rotation270deg;
+      default:
+        return null;
     }
   }
 
@@ -607,9 +680,7 @@ class _ScanScreenState extends State<ScanScreen> {
     final matches = RegExp(r'[가-힣]{2,4}')
         .allMatches(text)
         .map((match) => match.group(0)!)
-        .where(
-          (word) => word != '그리고' && word != '하지만' && word != '그러나',
-        )
+        .where((word) => word != '그리고' && word != '하지만' && word != '그러나')
         .take(2)
         .toList();
 
@@ -674,7 +745,8 @@ class _ScanScreenState extends State<ScanScreen> {
       _chatMessages.add(
         _ChatEntry(
           role: ChatRole.assistant,
-          content: answer ??
+          content:
+              answer ??
               'Claude API가 아직 연결되지 않았거나 응답을 받지 못했습니다. 나중에 API를 연결하면 더 정확한 답변을 받을 수 있습니다.',
         ),
       );
@@ -755,10 +827,7 @@ class _RoundIconButton extends StatelessWidget {
 }
 
 class _CameraFrame extends StatelessWidget {
-  const _CameraFrame({
-    required this.isScanning,
-    required this.child,
-  });
+  const _CameraFrame({required this.isScanning, required this.child});
 
   final bool isScanning;
   final Widget child;
@@ -771,9 +840,7 @@ class _CameraFrame extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(28),
         border: Border.all(
-          color: isScanning
-              ? const Color(0xFFFFC47B)
-              : const Color(0xFF5A4F46),
+          color: isScanning ? const Color(0xFFFFC47B) : const Color(0xFF5A4F46),
           width: 2,
         ),
         boxShadow: isScanning
@@ -881,10 +948,7 @@ class _CameraMessage extends StatelessWidget {
               const SizedBox(height: 10),
               Text(
                 description,
-                style: const TextStyle(
-                  color: Color(0xFFD6C9BC),
-                  height: 1.5,
-                ),
+                style: const TextStyle(color: Color(0xFFD6C9BC), height: 1.5),
                 textAlign: TextAlign.center,
               ),
             ],
@@ -1196,8 +1260,8 @@ class _ScanTabChip extends StatelessWidget {
     final textColor = disabled
         ? const Color(0xFFC6BBB0)
         : selected
-            ? const Color(0xFF8A4B17)
-            : const Color(0xFF6F675F);
+        ? const Color(0xFF8A4B17)
+        : const Color(0xFF6F675F);
 
     return Padding(
       padding: const EdgeInsets.only(right: 10),

@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 import '../app_state.dart';
 import '../models/book.dart';
@@ -378,7 +378,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       _messages.add(
         _ChatMessage(
           role: ChatRole.assistant,
-          content: answer ??
+          content:
+              answer ??
               'Claude API가 아직 연결되지 않았거나 응답을 받지 못했습니다. API를 연결하면 더 자연스러운 답변을 받을 수 있어요.',
         ),
       );

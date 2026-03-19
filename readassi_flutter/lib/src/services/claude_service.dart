@@ -61,7 +61,10 @@ class ClaudeService {
         .map((character) => '${character.name}: ${character.description}')
         .join('\n');
     final relationshipSummary = book.relationships
-        .map((relationship) => '${relationship.source} -> ${relationship.target}: ${relationship.label}')
+        .map(
+          (relationship) =>
+              '${relationship.source} -> ${relationship.target}: ${relationship.label}',
+        )
         .join('\n');
 
     return _sendMessage(
@@ -69,7 +72,8 @@ class ClaudeService {
           'You are a Korean reading assistant. Answer in natural Korean. '
           'Base your answer only on the provided book information. '
           'If the information is insufficient, say that clearly and answer cautiously.',
-      userPrompt: '''
+      userPrompt:
+          '''
 책 제목: ${book.title}
 저자: ${book.author}
 요약: ${book.summary}
@@ -105,10 +109,7 @@ $question
           'max_tokens': maxTokens,
           'system': system,
           'messages': [
-            {
-              'role': 'user',
-              'content': userPrompt,
-            },
+            {'role': 'user', 'content': userPrompt},
           ],
         }),
       );
@@ -141,7 +142,8 @@ $question
       }
 
       try {
-        return jsonDecode(text.substring(start, end + 1)) as Map<String, dynamic>;
+        return jsonDecode(text.substring(start, end + 1))
+            as Map<String, dynamic>;
       } catch (_) {
         return null;
       }
@@ -176,10 +178,7 @@ class ClaudeAnalysisResult {
 }
 
 class ClaudeCharacterResult {
-  ClaudeCharacterResult({
-    required this.name,
-    required this.description,
-  });
+  ClaudeCharacterResult({required this.name, required this.description});
 
   final String name;
   final String description;
