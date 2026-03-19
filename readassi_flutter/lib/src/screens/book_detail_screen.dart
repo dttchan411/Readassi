@@ -144,6 +144,11 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   }
 
   Widget _buildTabContent(BuildContext context, Book book) {
+    final chatCardHeight = (MediaQuery.of(context).size.height * 0.26).clamp(
+      220.0,
+      280.0,
+    );
+
     switch (_activeTab) {
       case BookDetailTab.summary:
         return Card(
@@ -296,57 +301,63 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           margin: EdgeInsets.zero,
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                SizedBox(
-                  height: 420,
-                  child: ListView.separated(
-                    itemCount: _messages.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 12),
-                    itemBuilder: (context, index) {
-                      final message = _messages[index];
-                      return ChatBubble(
-                        role: message.role,
-                        content: message.content,
-                      );
-                    },
+            child: SizedBox(
+              height: chatCardHeight,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: ListView.separated(
+                      padding: EdgeInsets.zero,
+                      itemCount: _messages.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (context, index) {
+                        final message = _messages[index];
+                        return ChatBubble(
+                          role: message.role,
+                          content: message.content,
+                        );
+                      },
+                    ),
                   ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        minLines: 1,
-                        maxLines: 3,
-                        decoration: const InputDecoration(
-                          hintText: '질문을 입력해주세요.',
-                          filled: true,
-                          fillColor: Color(0xFFF9F6F1),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.all(Radius.circular(18)),
-                            borderSide: BorderSide.none,
+                  const SizedBox(height: 14),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _controller,
+                          minLines: 1,
+                          maxLines: 3,
+                          decoration: const InputDecoration(
+                            hintText: '질문을 입력해주세요.',
+                            filled: true,
+                            fillColor: Color(0xFFF9F6F1),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.all(
+                                Radius.circular(18),
+                              ),
+                              borderSide: BorderSide.none,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    FilledButton(
-                      onPressed: _isSending
-                          ? null
-                          : () => _sendMessageWithClaude(book),
-                      style: FilledButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(18),
+                      const SizedBox(width: 10),
+                      FilledButton(
+                        onPressed: _isSending
+                            ? null
+                            : () => _sendMessageWithClaude(book),
+                        style: FilledButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          padding: const EdgeInsets.all(16),
                         ),
-                        padding: const EdgeInsets.all(16),
+                        child: const Icon(Icons.send_rounded),
                       ),
-                      child: const Icon(Icons.send_rounded),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         );

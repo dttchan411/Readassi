@@ -366,7 +366,9 @@ class _ScanScreenState extends State<ScanScreen> {
         selectedCamera,
         ResolutionPreset.medium,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        imageFormatGroup: defaultTargetPlatform == TargetPlatform.android
+            ? ImageFormatGroup.nv21
+            : ImageFormatGroup.bgra8888,
       );
 
       await controller.initialize();
@@ -525,7 +527,7 @@ class _ScanScreenState extends State<ScanScreen> {
       return null;
     }
 
-    final bytes = _concatenatePlanes(image.planes);
+    final bytes = _bytesFromCameraImage(image);
     final metadata = InputImageMetadata(
       size: Size(image.width.toDouble(), image.height.toDouble()),
       rotation: rotation,
@@ -536,9 +538,14 @@ class _ScanScreenState extends State<ScanScreen> {
     return InputImage.fromBytes(bytes: bytes, metadata: metadata);
   }
 
-  Uint8List _concatenatePlanes(List<Plane> planes) {
+  Uint8List _bytesFromCameraImage(CameraImage image) {
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        image.planes.isNotEmpty) {
+      return image.planes.first.bytes;
+    }
+
     final writeBuffer = WriteBuffer();
-    for (final plane in planes) {
+    for (final plane in image.planes) {
       writeBuffer.putUint8List(plane.bytes);
     }
     return writeBuffer.done().buffer.asUint8List();
@@ -1046,11 +1053,15 @@ class _ScanPanel extends StatelessWidget {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                   SizedBox(width: 10),
-                  Text(
-                    '카메라 화면을 읽으면서 OCR 텍스트를 갱신하고 있습니다...',
-                    style: TextStyle(
-                      color: Color(0xFFA46728),
-                      fontWeight: FontWeight.w600,
+                  Expanded(
+                    child: Text(
+                      '카메라 화면을 읽으면서 OCR 텍스트를 갱신하고 있습니다...',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Color(0xFFA46728),
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ],
@@ -1161,73 +1172,74 @@ class _ScanPanel extends StatelessWidget {
                             .toList(),
                       );
                     case ScanTab.chat:
-                      return Column(
-                        children: [
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(
-                              minHeight: 180,
-                              maxHeight: 220,
+                      return SizedBox(
+                        height: 280,
+                        child: Column(
+                          children: [
+                            Expanded(
+                              child: ListView.separated(
+                                itemCount: chatMessages.length,
+                                separatorBuilder: (_, _) =>
+                                    const SizedBox(height: 10),
+                                itemBuilder: (context, index) {
+                                  final message = chatMessages[index];
+                                  return ChatBubble(
+                                    role: message.role,
+                                    content: message.content,
+                                  );
+                                },
+                              ),
                             ),
-                            child: ListView.separated(
-                              shrinkWrap: true,
-                              itemCount: chatMessages.length,
-                              separatorBuilder: (_, _) =>
-                                  const SizedBox(height: 10),
-                              itemBuilder: (context, index) {
-                                final message = chatMessages[index];
-                                return ChatBubble(
-                                  role: message.role,
-                                  content: message.content,
-                                );
-                              },
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: TextField(
-                                  controller: chatController,
-                                  decoration: const InputDecoration(
-                                    hintText: '궁금한 점을 물어보세요.',
-                                    filled: true,
-                                    fillColor: Colors.white,
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.all(
-                                        Radius.circular(18),
+                            const SizedBox(height: 12),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    controller: chatController,
+                                    minLines: 1,
+                                    maxLines: 3,
+                                    decoration: const InputDecoration(
+                                      hintText: '궁금한 점을 물어보세요.',
+                                      filled: true,
+                                      fillColor: Colors.white,
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.all(
+                                          Radius.circular(18),
+                                        ),
+                                        borderSide: BorderSide(
+                                          color: Color(0xFFE4DDD6),
+                                        ),
                                       ),
-                                      borderSide: BorderSide(
-                                        color: Color(0xFFE4DDD6),
+                                      enabledBorder: OutlineInputBorder(
+                                        borderRadius: BorderRadius.all(
+                                          Radius.circular(18),
+                                        ),
+                                        borderSide: BorderSide(
+                                          color: Color(0xFFE4DDD6),
+                                        ),
                                       ),
                                     ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.all(
-                                        Radius.circular(18),
-                                      ),
-                                      borderSide: BorderSide(
-                                        color: Color(0xFFE4DDD6),
-                                      ),
+                                    onSubmitted: (_) => onSendMessage(),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                FilledButton(
+                                  onPressed: onSendMessage,
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: const Color(0xFFD58C40),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.all(16),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(18),
                                     ),
                                   ),
-                                  onSubmitted: (_) => onSendMessage(),
+                                  child: const Icon(Icons.send_rounded),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              FilledButton(
-                                onPressed: onSendMessage,
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFFD58C40),
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.all(16),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(18),
-                                  ),
-                                ),
-                                child: const Icon(Icons.send_rounded),
-                              ),
-                            ],
-                          ),
-                        ],
+                              ],
+                            ),
+                          ],
+                        ),
                       );
                   }
                 },
