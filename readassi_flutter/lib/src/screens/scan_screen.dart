@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
@@ -21,21 +22,17 @@ class ScanScreen extends StatefulWidget {
   State<ScanScreen> createState() => _ScanScreenState();
 }
 
-class _ScanScreenState extends State<ScanScreen> {
-  static const _scanInterval = Duration(milliseconds: 1400);
-
+class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
   final TextEditingController _chatController = TextEditingController();
   final ClaudeService _claudeService = ClaudeService();
 
   CameraController? _cameraController;
   TextRecognizer? _textRecognizer;
   Timer? _tooltipTimer;
-  DateTime _lastProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool _isCameraReady = false;
-  bool _isInitializingCamera = true;
+  bool _isInitializingCamera = false;
   bool _isScanning = false;
-  bool _isProcessingFrame = false;
   bool _showTooltip = true;
   bool _hasData = false;
 
@@ -59,6 +56,7 @@ class _ScanScreenState extends State<ScanScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tooltipTimer = Timer(const Duration(seconds: 5), () {
       if (mounted) {
         setState(() => _showTooltip = false);
@@ -69,14 +67,33 @@ class _ScanScreenState extends State<ScanScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tooltipTimer?.cancel();
     _chatController.dispose();
     unawaited(_textRecognizer?.close());
-    if (_cameraController?.value.isStreamingImages ?? false) {
-      unawaited(_cameraController?.stopImageStream());
-    }
-    unawaited(_cameraController?.dispose());
+    unawaited(_disposeCamera());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_supportsLiveCamera) {
+      return;
+    }
+
+    if (state == AppLifecycleState.resumed) {
+      if (!_isCameraReady && !_isInitializingCamera) {
+        unawaited(_initializeCamera());
+      }
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_disposeCamera(resetMessage: false));
+    }
   }
 
   @override
@@ -242,7 +259,7 @@ class _ScanScreenState extends State<ScanScreen> {
                       const SizedBox(height: 14),
                       Text(
                         _isScanning
-                            ? '실시간 인식 중'
+                            ? '페이지 읽는 중'
                             : (_hasData ? '다시 스캔하기' : '스캔 시작'),
                         style: const TextStyle(
                           color: Color(0xFFBFB2A2),
@@ -283,7 +300,7 @@ class _ScanScreenState extends State<ScanScreen> {
     if (_cameraError != null) {
       return _CameraMessage(
         icon: Icons.error_outline_rounded,
-        title: '카메라를 열 수 없습니다',
+        title: _cameraErrorTitle,
         description: _cameraError!,
       );
     }
@@ -351,7 +368,17 @@ class _ScanScreenState extends State<ScanScreen> {
       return;
     }
 
+    if (_isInitializingCamera) {
+      return;
+    }
+
+    setState(() {
+      _isInitializingCamera = true;
+      _cameraError = null;
+    });
+
     try {
+      await _disposeCamera(resetMessage: false);
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
         throw Exception('사용 가능한 카메라가 없습니다.');
@@ -398,8 +425,14 @@ class _ScanScreenState extends State<ScanScreen> {
 
   Future<void> _toggleScan() async {
     if (_isScanning) {
-      await _stopLiveScan();
-      await _ensureResultData();
+      return;
+    }
+
+    final lifecycleState = WidgetsBinding.instance.lifecycleState;
+    if (lifecycleState != AppLifecycleState.resumed) {
+      setState(() {
+        _cameraError = '앱 화면이 완전히 열린 뒤 다시 시도해주세요.';
+      });
       return;
     }
 
@@ -414,6 +447,7 @@ class _ScanScreenState extends State<ScanScreen> {
       _isScanning = true;
       _hasData = true;
       _activeTab = ScanTab.text;
+      _cameraError = null;
       _extractedText = '';
       _summary = '';
       _keywords = [];
@@ -421,19 +455,8 @@ class _ScanScreenState extends State<ScanScreen> {
       _chatMessages.clear();
     });
 
-    final controller = _cameraController;
-    if (controller == null) {
-      return;
-    }
-
     try {
-      if (controller.value.isStreamingImages) {
-        await controller.stopImageStream();
-      }
-
-      await controller.startImageStream((image) {
-        unawaited(_processCameraImage(image));
-      });
+      await _captureAndAnalyzeFrame();
     } catch (error) {
       if (!mounted) {
         return;
@@ -441,148 +464,99 @@ class _ScanScreenState extends State<ScanScreen> {
 
       setState(() {
         _isScanning = false;
-        _cameraError = '실시간 스캔 시작에 실패했습니다.\n$error';
+        _cameraError = '페이지 촬영과 분석에 실패했습니다.\n$error';
       });
     }
   }
 
-  Future<void> _stopLiveScan() async {
-    final controller = _cameraController;
-    if (controller != null && controller.value.isStreamingImages) {
-      try {
-        await controller.stopImageStream();
-      } catch (_) {
-        // If the stream is already stopping, we can safely ignore the error.
-      }
-    }
-
-    if (mounted) {
-      setState(() => _isScanning = false);
-    }
-  }
-
-  Future<void> _processCameraImage(CameraImage image) async {
+  Future<void> _captureAndAnalyzeFrame() async {
     final controller = _cameraController;
     final textRecognizer = _textRecognizer;
-    final now = DateTime.now();
+    if (controller == null || textRecognizer == null) {
+      throw Exception('카메라 또는 OCR 준비가 아직 끝나지 않았습니다.');
+    }
 
-    if (!_isScanning ||
-        _isProcessingFrame ||
-        controller == null ||
-        textRecognizer == null ||
-        !controller.value.isInitialized ||
-        now.difference(_lastProcessedAt) < _scanInterval) {
+    if (controller.value.isTakingPicture) {
       return;
     }
 
-    _isProcessingFrame = true;
-    _lastProcessedAt = now;
+    XFile? capturedImage;
 
     try {
-      final inputImage = _inputImageFromCameraImage(image, controller);
-      if (inputImage == null) {
-        return;
-      }
-
+      capturedImage = await controller.takePicture();
+      final inputImage = InputImage.fromFilePath(capturedImage.path);
       final recognizedText = await textRecognizer.processImage(inputImage);
-
-      if (!mounted) {
-        return;
-      }
-
       final normalizedText = recognizedText.text.trim();
-      if (normalizedText.isEmpty) {
-        return;
-      }
 
-      setState(() {
-        _extractedText = _mergeRecognizedText(_extractedText, normalizedText);
-      });
-    } catch (error) {
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _cameraError = '실시간 OCR 처리 중 문제가 발생했습니다.\n$error';
+        _isScanning = false;
+        _extractedText = normalizedText;
+        if (normalizedText.isEmpty) {
+          _cameraError = '텍스트를 찾지 못했습니다. 책 페이지를 더 가까이 맞춘 뒤 다시 시도해주세요.';
+        }
       });
+      await _ensureResultData();
     } finally {
-      _isProcessingFrame = false;
-    }
-  }
-
-  InputImage? _inputImageFromCameraImage(
-    CameraImage image,
-    CameraController controller,
-  ) {
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) {
-      return null;
-    }
-
-    final rotation = _rotationFromSensor(
-      controller.description.sensorOrientation,
-    );
-    if (rotation == null) {
-      return null;
-    }
-
-    final bytes = _bytesFromCameraImage(image);
-    final metadata = InputImageMetadata(
-      size: Size(image.width.toDouble(), image.height.toDouble()),
-      rotation: rotation,
-      format: format,
-      bytesPerRow: image.planes.first.bytesPerRow,
-    );
-
-    return InputImage.fromBytes(bytes: bytes, metadata: metadata);
-  }
-
-  Uint8List _bytesFromCameraImage(CameraImage image) {
-    if (defaultTargetPlatform == TargetPlatform.android &&
-        image.planes.isNotEmpty) {
-      return image.planes.first.bytes;
-    }
-
-    final writeBuffer = WriteBuffer();
-    for (final plane in image.planes) {
-      writeBuffer.putUint8List(plane.bytes);
-    }
-    return writeBuffer.done().buffer.asUint8List();
-  }
-
-  InputImageRotation? _rotationFromSensor(int sensorOrientation) {
-    switch (sensorOrientation) {
-      case 0:
-        return InputImageRotation.rotation0deg;
-      case 90:
-        return InputImageRotation.rotation90deg;
-      case 180:
-        return InputImageRotation.rotation180deg;
-      case 270:
-        return InputImageRotation.rotation270deg;
-      default:
-        return null;
-    }
-  }
-
-  String _mergeRecognizedText(String current, String next) {
-    if (current.isEmpty) {
-      return next;
-    }
-    if (current.contains(next)) {
-      return current;
-    }
-    if (next.contains(current)) {
-      return next;
-    }
-    if (current.length > 80 && next.length > 80) {
-      final currentTail = current.substring(max(0, current.length - 80));
-      if (next.startsWith(currentTail)) {
-        return current + next.substring(currentTail.length);
+      if (capturedImage != null) {
+        unawaited(_deleteTempCapture(capturedImage.path));
       }
     }
-    return '$current\n\n$next';
+  }
+
+  Future<void> _deleteTempCapture(String path) async {
+    try {
+      await File(path).delete();
+    } catch (_) {
+      // Temporary camera files can already be gone on some devices.
+    }
+  }
+
+  String get _cameraErrorTitle {
+    final error = _cameraError ?? '';
+    if (error.contains('텍스트를 찾지 못했습니다')) {
+      return '텍스트를 찾지 못했습니다';
+    }
+    if (error.contains('앱 화면이 완전히 열린 뒤')) {
+      return '잠시 후 다시 시도해주세요';
+    }
+    if (error.contains('페이지 촬영과 분석에 실패했습니다')) {
+      return '페이지 분석에 실패했습니다';
+    }
+    return '카메라를 열 수 없습니다';
+  }
+
+  Future<void> _disposeCamera({bool resetMessage = true}) async {
+    final controller = _cameraController;
+    _cameraController = null;
+
+    if (mounted) {
+      setState(() {
+        _isCameraReady = false;
+        _isScanning = false;
+        _isInitializingCamera = false;
+        if (resetMessage) {
+          _cameraError = '카메라를 다시 준비하고 있습니다.';
+        }
+      });
+    } else {
+      _isCameraReady = false;
+      _isScanning = false;
+      _isInitializingCamera = false;
+    }
+
+    if (controller == null) {
+      return;
+    }
+
+    try {
+      await controller.dispose();
+    } catch (_) {
+      // Some devices already close the camera when the app goes inactive.
+    }
   }
 
   Future<void> _ensureResultData() async {
