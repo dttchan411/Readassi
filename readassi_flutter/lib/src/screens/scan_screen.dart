@@ -178,7 +178,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
                       border: Border.all(color: const Color(0xFF4C443D)),
                     ),
                     child: const Text(
-                      '카메라 화면에 책 페이지를 맞춘 뒤\n아래 버튼으로 실시간 스캔을 시작해보세요.',
+                      '카메라 화면에 본문 페이지를 크게 맞춘 뒤\n아래 버튼으로 페이지를 읽어보세요.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xFFF3EDE4), height: 1.5),
                     ),
@@ -292,7 +292,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
       return const _CameraMessage(
         icon: Icons.camera_alt_outlined,
         title: '카메라 준비 중',
-        description: '잠시만 기다리면 실시간 스캔 화면이 열립니다.',
+        description: '잠시만 기다리면 페이지 촬영 화면이 열립니다.',
         loading: true,
       );
     }
@@ -391,7 +391,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
 
       final controller = CameraController(
         selectedCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.veryHigh,
         enableAudio: false,
         imageFormatGroup: defaultTargetPlatform == TargetPlatform.android
             ? ImageFormatGroup.nv21
@@ -399,6 +399,9 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
       );
 
       await controller.initialize();
+      await controller.setFocusMode(FocusMode.auto);
+      await controller.setExposureMode(ExposureMode.auto);
+      await controller.setFlashMode(FlashMode.off);
       _textRecognizer ??= TextRecognizer(script: TextRecognitionScript.korean);
 
       if (!mounted) {
@@ -483,6 +486,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
     XFile? capturedImage;
 
     try {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
       capturedImage = await controller.takePicture();
       final inputImage = InputImage.fromFilePath(capturedImage.path);
       final recognizedText = await textRecognizer.processImage(inputImage);
@@ -496,7 +500,8 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
         _isScanning = false;
         _extractedText = normalizedText;
         if (normalizedText.isEmpty) {
-          _cameraError = '텍스트를 찾지 못했습니다. 책 페이지를 더 가까이 맞춘 뒤 다시 시도해주세요.';
+          _cameraError =
+              '텍스트를 찾지 못했습니다. 삽화보다 글자가 많은 본문 페이지를 더 가까이 맞춘 뒤 다시 시도해주세요.';
         }
       });
       await _ensureResultData();
@@ -1029,7 +1034,7 @@ class _ScanPanel extends StatelessWidget {
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      '카메라 화면을 읽으면서 OCR 텍스트를 갱신하고 있습니다...',
+                      '본문 페이지를 읽어서 OCR 텍스트를 정리하고 있습니다...',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -1050,7 +1055,7 @@ class _ScanPanel extends StatelessWidget {
                     case ScanTab.text:
                       return Text(
                         extractedText.isEmpty
-                            ? '실시간 OCR 결과가 아직 없습니다.'
+                            ? '아직 읽힌 본문 텍스트가 없습니다.'
                             : extractedText,
                         style: Theme.of(
                           context,
