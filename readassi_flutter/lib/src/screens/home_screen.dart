@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'continue_reading_screen.dart';
-import 'scan_screen.dart';
+import 'add_book_screen.dart'; // [수정] 스캔 대신 제목 입력 화면 임포트
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -62,13 +62,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   _MenuCard(
                     title: '새로 책 읽기',
-                    description: '새로운 책을 카메라로 스캔하고 분석 기록을 시작합니다.',
+                    description: '새로운 책을 등록하고 카메라로 스캔을 시작합니다.', // 설명 살짝 수정
                     icon: Icons.add,
                     accent: const Color(0xFFFFF0D9),
                     onTap: () async {
+                      // [핵심 수정] 바로 ScanScreen으로 가지 않고 AddBookScreen으로 보냅니다.
                       await Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => const ScanScreen(),
+                          builder: (_) => const AddBookScreen(),
                         ),
                       );
                       if (mounted) {
@@ -104,6 +105,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+// _MenuCard 클래스는 기존과 동일하므로 유지하시면 됩니다.
 class _MenuCard extends StatelessWidget {
   const _MenuCard({
     required this.title,
@@ -125,6 +127,7 @@ class _MenuCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)), // 테두리 둥글게 추가
       color: muted ? const Color(0xFFFAF8F5) : Colors.white,
       child: InkWell(
         borderRadius: BorderRadius.circular(24),

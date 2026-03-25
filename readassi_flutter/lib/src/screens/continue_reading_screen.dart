@@ -113,7 +113,10 @@ class _ContinueReadingScreenState extends State<ContinueReadingScreen> {
                       onTap: () async {
                         await Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) => ScanScreen(existingBookId: book.id),
+                            builder: (_) => ScanScreen(
+                              bookId: book.id,
+                              bookTitle: book.title,
+                            ),
                           ),
                         );
                         if (mounted) {

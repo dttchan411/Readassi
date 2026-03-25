@@ -1,8 +1,6 @@
 import 'dart:convert';
-
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import 'models/book.dart';
 import 'models/mock_books.dart';
 
@@ -12,24 +10,47 @@ class AppState extends ChangeNotifier {
   }
 
   static const _booksStorageKey = 'saved_books_v1';
-
   final List<Book> _books;
   bool _isLoaded = false;
 
   List<Book> get books => List<Book>.unmodifiable(_books);
   bool get isLoaded => _isLoaded;
 
-  void addBook(Book book) {
-    _books.insert(0, book);
+  String addBook(String title) {
+    final String newId = DateTime.now().millisecondsSinceEpoch.toString();
+    
+    final newBook = Book(
+      id: newId,
+      title: title,
+      author: '작자 미상',
+      coverUrl: '',
+      summary: '',
+      characters: [],
+      relationships: [],
+      keywords: [],
+      currentPage: 0,
+      totalPages: 0,
+      progress: 0,
+    );
+
+    _books.insert(0, newBook);
     _saveBooks();
     notifyListeners();
+    
+    return newId; 
+  }
+  void deleteBook(String bookId) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index != -1) {
+      _books.removeAt(index);
+      _saveBooks();           // SharedPreferences에도 반영
+      notifyListeners();
+    }
   }
 
   Book? findBookById(String id) {
     for (final book in _books) {
-      if (book.id == id) {
-        return book;
-      }
+      if (book.id == id) return book;
     }
     return null;
   }
@@ -38,9 +59,7 @@ class AppState extends ChangeNotifier {
     final seenTitles = <String>{};
     final unique = <Book>[];
     for (final book in _books) {
-      if (seenTitles.add(book.title)) {
-        unique.add(book);
-      }
+      if (seenTitles.add(book.title)) unique.add(book);
     }
     return unique;
   }
@@ -58,10 +77,7 @@ class AppState extends ChangeNotifier {
             decoded.map((item) => Book.fromJson(item as Map<String, dynamic>)),
           );
       } catch (_) {
-        // 저장된 데이터가 깨진 경우에는 기본 목업 데이터로 다시 시작합니다.
-        _books
-          ..clear()
-          ..addAll(mockBooks);
+        _books..clear()..addAll(mockBooks);
       }
     }
 
@@ -75,6 +91,7 @@ class AppState extends ChangeNotifier {
     await prefs.setString(_booksStorageKey, encoded);
   }
 }
+
 
 class AppStateScope extends InheritedNotifier<AppState> {
   const AppStateScope({
