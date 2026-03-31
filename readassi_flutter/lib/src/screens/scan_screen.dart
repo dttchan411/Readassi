@@ -11,8 +11,8 @@ import 'package:flutter/foundation.dart';
 import '../app_state.dart';
 import 'book_detail_screen.dart';
 
-const String _googleVisionApiKey = 'AIzaSyBq0aiZ7XoXH_KTao5fXanZJxT6HMrwC9w';
-const String _geminiApiKey = 'AIzaSyCNuqLUTLTrRTq1RVzeg71QYJY1C0YD6H0';
+const String _googleVisionApiKey = '';
+const String _geminiApiKey = '';
 
 class ScanScreen extends StatefulWidget {
   final String bookId;

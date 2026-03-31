@@ -74,6 +74,36 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     }
   }
+  /// Kakao/Google에서 가져온 정보로 책 정보 일괄 업데이트
+  void updateBookInfo({
+    required String bookId,
+    required String author,
+    int? totalPages,
+    String? coverUrl,
+  }) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index == -1) return;
+
+    final oldBook = _books[index];
+
+    final updatedBook = Book(
+      id: oldBook.id,
+      title: oldBook.title,
+      author: author,
+      coverUrl: coverUrl ?? oldBook.coverUrl,
+      summary: oldBook.summary,
+      characters: oldBook.characters,
+      relationships: oldBook.relationships,
+      keywords: oldBook.keywords,
+      currentPage: oldBook.currentPage,
+      totalPages: totalPages ?? oldBook.totalPages,
+      progress: oldBook.progress,
+    );
+
+    _books[index] = updatedBook;
+    _saveBooks();
+    notifyListeners();
+  }
 
   void updateBookAuthor(String bookId, String author) {
     final index = _books.indexWhere((book) => book.id == bookId);

@@ -5,7 +5,8 @@ import 'dart:convert';
 import '../app_state.dart';
 import 'scan_screen.dart';
 
-const String _geminiApiKey = 'AIzaSyCNuqLUTLTrRTq1RVzeg71QYJY1C0YD6H0';
+const String _kakaoApiKey = '';
+const String _googleBooksApiKey = '';
 
 class AddBookScreen extends StatefulWidget {
   const AddBookScreen({super.key});
@@ -18,7 +19,7 @@ class _AddBookScreenState extends State<AddBookScreen> {
   final TextEditingController _titleController = TextEditingController();
   bool _isLoading = false;
 
-  Future<void> _proceedToScan() async {
+  void _proceedToScan() async {
     final String title = _titleController.text.trim();
     if (title.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -33,15 +34,7 @@ class _AddBookScreenState extends State<AddBookScreen> {
     final appState = AppStateScope.of(context);
     final String newBookId = appState.addBook(title);
 
-    // 2. Gemini에게 작가 물어보기
-    final author = await _askAuthorToGemini(title);
-
-    // 3. 작가 업데이트
-    appState.updateBookAuthor(newBookId, author);
-
-    setState(() => _isLoading = false);
-
-    // ScanScreen으로 이동
+    // 2. ScanScreen으로 바로 이동 (사용자 대기 없이)
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -51,42 +44,83 @@ class _AddBookScreenState extends State<AddBookScreen> {
         ),
       ),
     );
+
+    // 3. 백그라운드에서 작가·페이지·표지 업데이트
+    _fetchAndUpdateBookInfo(newBookId, title);
   }
 
-  /// Gemini에게 책 제목으로 작가 물어보기
-  Future<String> _askAuthorToGemini(String bookTitle) async {
-    final prompt = """
-다음 책의 정확한 작가(지은이) 이름을 알려줘.
+  Future<void> _fetchAndUpdateBookInfo(String bookId, String title) async {
+    final isKorean = RegExp(r'^[가-힣]').hasMatch(title);
 
-책 제목: "$bookTitle"
+    Map<String, dynamic>? info;
 
-- 반드시 실제 작가 이름을 한 명만 정확히 말해
-- 모르거나 확실하지 않으면 "작자 미상"이라고만 답변해
-- 다른 설명, 문장, 괄호, "작가:" 같은 단어는 절대 넣지 말고 이름만 출력해
-""";
+    // 한글이면 Kakao 먼저, 아니면 Google 먼저
+    if (isKorean) {
+      info = await _searchKakao(title);
+      if (info == null) info = await _searchGoogle(title);
+    } else {
+      info = await _searchGoogle(title);
+      if (info == null) info = await _searchKakao(title);
+    }
 
+    if (info != null) {
+      final appState = AppStateScope.of(context);
+      appState.updateBookInfo(
+        bookId: bookId,
+        author: info['author'] ?? '작자 미상',
+        totalPages: info['totalPages'],
+        coverUrl: info['coverUrl'],
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>?> _searchKakao(String query) async {
     try {
-      final response = await http.post(
-        Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$_geminiApiKey'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          "contents": [{"parts": [{"text": prompt}]}],
-          "generationConfig": {"temperature": 0.2, "maxOutputTokens": 100},
-        }),
+      final response = await http.get(
+        Uri.parse('https://dapi.kakao.com/v3/search/book.json?query=${Uri.encodeComponent(query)}'),
+        headers: {'Authorization': 'KakaoAK $_kakaoApiKey'},
       );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        final answer = data['candidates']?[0]?['content']?['parts']?[0]?['text']?.trim();
-        if (answer != null && answer.isNotEmpty) {
-          return answer;
-        }
+        final documents = data['documents'] as List<dynamic>?;
+        if (documents == null || documents.isEmpty) return null;
+
+        final book = documents.first;
+        return {
+          'author': (book['authors'] as List<dynamic>?)?.join(', ') ?? '작자 미상',
+          'totalPages': book['contents'] != null ? null : null, // Kakao는 페이지 수를 주지 않음
+          'coverUrl': book['thumbnail'] ?? '',
+        };
       }
     } catch (e) {
-      debugPrint("Gemini 작가 조회 실패: $e");
+      debugPrint("Kakao API 오류: $e");
     }
+    return null;
+  }
 
-    return '작자 미상';
+  Future<Map<String, dynamic>?> _searchGoogle(String query) async {
+    try {
+      final response = await http.get(
+        Uri.parse('https://www.googleapis.com/books/v1/volumes?q=${Uri.encodeComponent(query)}&key=$_googleBooksApiKey'),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final items = data['items'] as List<dynamic>?;
+        if (items == null || items.isEmpty) return null;
+
+        final volumeInfo = items.first['volumeInfo'] as Map<String, dynamic>;
+        return {
+          'author': (volumeInfo['authors'] as List<dynamic>?)?.join(', ') ?? '작자 미상',
+          'totalPages': volumeInfo['pageCount'],
+          'coverUrl': volumeInfo['imageLinks']?['thumbnail'] ?? '',
+        };
+      }
+    } catch (e) {
+      debugPrint("Google Books API 오류: $e");
+    }
+    return null;
   }
 
   @override
@@ -140,9 +174,7 @@ class _AddBookScreenState extends State<AddBookScreen> {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFB5651D),
                   foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                 ),
                 child: _isLoading
                     ? const CircularProgressIndicator(color: Colors.white)

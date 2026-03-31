@@ -14,7 +14,10 @@ class BookProgressBar extends StatelessWidget {
       style: Theme.of(context)
           .textTheme
           .bodySmall
-          ?.copyWith(fontWeight: FontWeight.w600),
+          ?.copyWith(
+            fontWeight: FontWeight.w600,
+            color: const Color(0xFF4A4541),
+          ),
     );
   }
 }
