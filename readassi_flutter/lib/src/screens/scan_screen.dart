@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/foundation.dart';
 
 import '../app_state.dart';
+import 'book_detail_screen.dart'; // ← BookDetailScreen으로 자동 이동하기 위해 추가
 
 const String _googleVisionApiKey = '';
 const String _geminiApiKey = '';
@@ -29,8 +30,6 @@ class _ScanScreenState extends State<ScanScreen> {
   bool _isCameraInitialized = false;
   bool _isAnalyzing = false;
 
-  String? _displaySummary;
-
   @override
   void initState() {
     super.initState();
@@ -47,7 +46,7 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) return;
-      _controller = CameraController(cameras.first, ResolutionPreset.high, enableAudio: false);
+      _controller = CameraController(cameras.first, ResolutionPreset.medium, enableAudio: false);
       await _controller!.initialize();
       if (!mounted) return;
       setState(() => _isCameraInitialized = true);
@@ -100,6 +99,12 @@ class _ScanScreenState extends State<ScanScreen> {
       final bytes = await File(photo.path).readAsBytes();
       final text = await _getVisionText(bytes);
       await _appendToOriginalText(text);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("페이지가 저장되었습니다. 계속 촬영하거나 업데이트를 눌러주세요.")),
+        );
+      }
     } catch (e) {
       debugPrint("촬영 오류: $e");
     } finally {
@@ -108,24 +113,43 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Future<void> _performUpdate() async {
+    if (_isAnalyzing) return;
     setState(() => _isAnalyzing = true);
 
     try {
       final filePath = await _getOriginalTextFilePath();
-      final fullText = await File(filePath).exists() 
-          ? await File(filePath).readAsString() 
+      final fullText = await File(filePath).exists()
+          ? await File(filePath).readAsString()
           : "";
 
-      if (fullText.trim().isEmpty) throw Exception("스캔된 텍스트가 없습니다.");
+      if (fullText.trim().isEmpty) {
+        throw Exception("스캔된 텍스트가 없습니다. 먼저 페이지를 촬영해주세요.");
+      }
 
-      final displaySummary = await _getGeminiUpdateSummary(fullText);
+      final newSummary = await _getGeminiUpdateSummary(fullText);
+
+      if (newSummary.contains("실패") || newSummary.contains("오류")) {
+        throw Exception("요약 생성에 실패했습니다.");
+      }
+
+      // AppState를 통해 책의 요약을 직접 업데이트
+      final appState = AppStateScope.of(context);
+      appState.updateBookSummary(widget.bookId, newSummary); // ← AppState.dart에 이 메서드를 추가해야 합니다.
 
       if (mounted) {
-        setState(() => _displaySummary = displaySummary);
+        // ScanScreen을 종료하고 분석 기록의 책 상세 화면으로 바로 이동
+        // (새 창/결과 뷰는 완전히 제거됨)
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => BookDetailScreen(bookId: widget.bookId),
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("업데이트 실패: $e")),
+        );
       }
     } finally {
       if (mounted) setState(() => _isAnalyzing = false);
@@ -133,8 +157,8 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Future<String> _getGeminiUpdateSummary(String fullText) async {
-    final limitedText = fullText.length > 8000 
-        ? fullText.substring(0, 8000) + "\n...(생략)..." 
+    final limitedText = fullText.length > 8000
+        ? fullText.substring(0, 8000) + "\n...(생략)..."
         : fullText;
 
     final prompt = """
@@ -189,11 +213,8 @@ $limitedText
       ),
       body: Stack(
         children: [
-          if (_displaySummary == null)
-            CameraPreview(_controller!),
-
-          if (_displaySummary != null)
-            _buildResultView(),
+          // 항상 카메라 프리뷰만 표시 (결과 뷰 완전 제거)
+          CameraPreview(_controller!),
 
           if (_isAnalyzing)
             Container(
@@ -224,7 +245,7 @@ $limitedText
             children: [
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: _displaySummary == null ? _takePictureAndProcess : null,
+                  onPressed: _isAnalyzing ? null : _takePictureAndProcess,
                   icon: const Icon(Icons.camera_alt, size: 24),
                   label: const Text("페이지 촬영", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
                   style: ElevatedButton.styleFrom(
@@ -238,7 +259,7 @@ $limitedText
               const SizedBox(width: 16),
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: _performUpdate,
+                  onPressed: _isAnalyzing ? null : _performUpdate,
                   icon: const Icon(Icons.summarize_outlined, size: 24),
                   label: const Text("업데이트", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
                   style: OutlinedButton.styleFrom(
@@ -251,42 +272,6 @@ $limitedText
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildResultView() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildCard("✨ 업데이트된 스토리 요약", _displaySummary!, Colors.orange[50]!),
-          const SizedBox(height: 50),
-          SizedBox(
-            width: double.infinity,
-            height: 56,
-            child: ElevatedButton(
-              onPressed: () => setState(() => _displaySummary = null),
-              child: const Text("다시 촬영 시작하기"),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCard(String title, String content, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(16)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          const Divider(),
-          Text(content),
-        ],
       ),
     );
   }

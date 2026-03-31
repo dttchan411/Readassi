@@ -39,11 +39,40 @@ class AppState extends ChangeNotifier {
     
     return newId; 
   }
+
   void deleteBook(String bookId) {
     final index = _books.indexWhere((book) => book.id == bookId);
     if (index != -1) {
       _books.removeAt(index);
-      _saveBooks();           // SharedPreferences에도 반영
+      _saveBooks();
+      notifyListeners();
+    }
+  }
+
+  /// ⭐ 새로 추가된 메서드
+  /// 업데이트 버튼을 누르면 Gemini가 만든 요약을 여기서 책 데이터에 직접 저장합니다.
+  void updateBookSummary(String bookId, String newSummary) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index != -1) {
+      final oldBook = _books[index];
+
+      // Book 모델의 모든 필드를 그대로 복사하면서 summary만 새 값으로 교체
+      final updatedBook = Book(
+        id: oldBook.id,
+        title: oldBook.title,
+        author: oldBook.author,
+        coverUrl: oldBook.coverUrl,
+        summary: newSummary,
+        characters: oldBook.characters,
+        relationships: oldBook.relationships,
+        keywords: oldBook.keywords,
+        currentPage: oldBook.currentPage,
+        totalPages: oldBook.totalPages,
+        progress: oldBook.progress,
+      );
+
+      _books[index] = updatedBook;
+      _saveBooks();
       notifyListeners();
     }
   }
@@ -91,7 +120,6 @@ class AppState extends ChangeNotifier {
     await prefs.setString(_booksStorageKey, encoded);
   }
 }
-
 
 class AppStateScope extends InheritedNotifier<AppState> {
   const AppStateScope({
