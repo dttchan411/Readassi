@@ -49,14 +49,12 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// ⭐ 새로 추가된 메서드
-  /// 업데이트 버튼을 누르면 Gemini가 만든 요약을 여기서 책 데이터에 직접 저장합니다.
+  /// 업데이트 버튼에서 요약 + 페이지 번호를 동시에 업데이트
   void updateBookSummary(String bookId, String newSummary) {
     final index = _books.indexWhere((book) => book.id == bookId);
     if (index != -1) {
       final oldBook = _books[index];
 
-      // Book 모델의 모든 필드를 그대로 복사하면서 summary만 새 값으로 교체
       final updatedBook = Book(
         id: oldBook.id,
         title: oldBook.title,
@@ -69,6 +67,65 @@ class AppState extends ChangeNotifier {
         currentPage: oldBook.currentPage,
         totalPages: oldBook.totalPages,
         progress: oldBook.progress,
+      );
+
+      _books[index] = updatedBook;
+      _saveBooks();
+      notifyListeners();
+    }
+  }
+
+  void updateBookAuthor(String bookId, String author) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index != -1) {
+      final oldBook = _books[index];
+
+      final updatedBook = Book(
+        id: oldBook.id,
+        title: oldBook.title,
+        author: author,
+        coverUrl: oldBook.coverUrl,
+        summary: oldBook.summary,
+        characters: oldBook.characters,
+        relationships: oldBook.relationships,
+        keywords: oldBook.keywords,
+        currentPage: oldBook.currentPage,
+        totalPages: oldBook.totalPages,
+        progress: oldBook.progress,
+      );
+
+      _books[index] = updatedBook;
+      _saveBooks();
+      notifyListeners();
+    }
+  }
+  
+  /// 업데이트 버튼을 눌렀을 때 마지막 페이지 번호도 함께 업데이트
+  void updateBookCurrentPage(String bookId, int? currentPage) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index != -1) {
+      final oldBook = _books[index];
+
+      // null이면 기존 페이지 유지 (Book 모델이 nullable일 경우도 안전)
+      final int newPage = currentPage ?? oldBook.currentPage ?? 0;
+
+      // totalPages가 null일 수도 있으므로 안전하게 처리
+      final int totalPages = oldBook.totalPages ?? 0;
+
+      final updatedBook = Book(
+        id: oldBook.id,
+        title: oldBook.title,
+        author: oldBook.author,
+        coverUrl: oldBook.coverUrl,
+        summary: oldBook.summary,
+        characters: oldBook.characters,
+        relationships: oldBook.relationships,
+        keywords: oldBook.keywords,
+        currentPage: newPage,
+        totalPages: oldBook.totalPages,           // 원래 값 유지
+        progress: totalPages > 0 
+            ? (newPage / totalPages * 100).round() 
+            : 0,
       );
 
       _books[index] = updatedBook;

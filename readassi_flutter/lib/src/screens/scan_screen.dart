@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -10,10 +9,10 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/foundation.dart';
 
 import '../app_state.dart';
-import 'book_detail_screen.dart'; // ← BookDetailScreen으로 자동 이동하기 위해 추가
+import 'book_detail_screen.dart';
 
-const String _googleVisionApiKey = '';
-const String _geminiApiKey = '';
+const String _googleVisionApiKey = 'AIzaSyBq0aiZ7XoXH_KTao5fXanZJxT6HMrwC9w';
+const String _geminiApiKey = 'AIzaSyCNuqLUTLTrRTq1RVzeg71QYJY1C0YD6H0';
 
 class ScanScreen extends StatefulWidget {
   final String bookId;
@@ -100,9 +99,17 @@ class _ScanScreenState extends State<ScanScreen> {
       final text = await _getVisionText(bytes);
       await _appendToOriginalText(text);
 
+      // ⭐⭐⭐ 마지막 부분(하단) 숫자만 추출
+      final pageNumber = _extractPageNumber(text);
+      if (pageNumber != null) {
+        final appState = AppStateScope.of(context);
+        appState.updateBookCurrentPage(widget.bookId, pageNumber);
+        debugPrint("📄 마지막 부분 페이지 감지됨 → $pageNumber 페이지로 업데이트");
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("페이지가 저장되었습니다. 계속 촬영하거나 업데이트를 눌러주세요.")),
+          const SnackBar(content: Text("페이지 저장 완료!")),
         );
       }
     } catch (e) {
@@ -123,7 +130,7 @@ class _ScanScreenState extends State<ScanScreen> {
           : "";
 
       if (fullText.trim().isEmpty) {
-        throw Exception("스캔된 텍스트가 없습니다. 먼저 페이지를 촬영해주세요.");
+        throw Exception("스캔된 텍스트가 없습니다.");
       }
 
       final newSummary = await _getGeminiUpdateSummary(fullText);
@@ -132,24 +139,17 @@ class _ScanScreenState extends State<ScanScreen> {
         throw Exception("요약 생성에 실패했습니다.");
       }
 
-      // AppState를 통해 책의 요약을 직접 업데이트
       final appState = AppStateScope.of(context);
-      appState.updateBookSummary(widget.bookId, newSummary); // ← AppState.dart에 이 메서드를 추가해야 합니다.
+      appState.updateBookSummary(widget.bookId, newSummary);
 
       if (mounted) {
-        // ScanScreen을 종료하고 분석 기록의 책 상세 화면으로 바로 이동
-        // (새 창/결과 뷰는 완전히 제거됨)
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (_) => BookDetailScreen(bookId: widget.bookId),
-          ),
+          MaterialPageRoute(builder: (_) => BookDetailScreen(bookId: widget.bookId)),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("업데이트 실패: $e")),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
       }
     } finally {
       if (mounted) setState(() => _isAnalyzing = false);
@@ -198,6 +198,31 @@ $limitedText
     }
   }
 
+  /// : 마지막 8줄만 보고 페이지 번호 추출
+  int? _extractPageNumber(String fullText) {
+    if (fullText.trim().isEmpty) return null;
+
+    final lines = fullText.split('\n');
+    final lastLines = lines.length > 8 ? lines.sublist(lines.length - 8) : lines;
+
+    int? bestPage;
+
+    for (final line in lastLines) {
+      final matches = RegExp(r'\b(\d{1,3})\b').allMatches(line);  // 1~3자리 숫자만
+
+      for (final m in matches) {
+        final num = int.tryParse(m.group(1)!);
+        if (num != null && num >= 1 && num <= 999) {
+          if (bestPage == null || num > bestPage) {
+            bestPage = num;
+          }
+        }
+      }
+    }
+
+    return bestPage;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_isCameraInitialized || _controller == null) {
@@ -213,7 +238,6 @@ $limitedText
       ),
       body: Stack(
         children: [
-          // 항상 카메라 프리뷰만 표시 (결과 뷰 완전 제거)
           CameraPreview(_controller!),
 
           if (_isAnalyzing)
@@ -233,7 +257,6 @@ $limitedText
         ],
       ),
 
-      // ==================== 하단 버튼 영역 (UI 개선) ====================
       bottomNavigationBar: SafeArea(
         child: Container(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
