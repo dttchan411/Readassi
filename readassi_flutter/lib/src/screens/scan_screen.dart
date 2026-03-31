@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -28,6 +29,10 @@ class _ScanScreenState extends State<ScanScreen> {
   CameraController? _controller;
   bool _isCameraInitialized = false;
   bool _isAnalyzing = false;
+
+  // OCR 백그라운드 큐
+  final List<Future<void>> _ocrQueue = [];
+  int _pendingOcrCount = 0;
 
   @override
   void initState() {
@@ -61,10 +66,32 @@ class _ScanScreenState extends State<ScanScreen> {
     return p.join(bookDir.path, '${widget.bookId}_original.txt');
   }
 
-  Future<void> _appendToOriginalText(String newText) async {
-    final file = File(await _getOriginalTextFilePath());
-    if (!await file.exists()) await file.create();
-    await file.writeAsString('$newText\n\n', mode: FileMode.append);
+  // 백그라운드에서 순차적으로 OCR 처리
+  Future<void> _enqueueOcr(Uint8List bytes) async {
+    final completer = Completer<void>();
+    _ocrQueue.add(completer.future);
+    setState(() => _pendingOcrCount = _ocrQueue.length);
+
+    try {
+      final text = await _getVisionText(bytes);
+      await _appendToOriginalText(text);
+
+      //여기서 페이지 번호 추출 & 업데이트
+      final pageNumber = _extractPageNumber(text);
+      if (pageNumber != null) {
+        final appState = AppStateScope.of(context);
+        appState.updateBookCurrentPage(widget.bookId, pageNumber);
+        debugPrint("📄 페이지 감지됨 → $pageNumber 페이지로 업데이트");
+      }
+    } catch (e) {
+      debugPrint("OCR 처리 실패: $e");
+    } finally {
+      completer.complete();
+      _ocrQueue.removeAt(0);
+      if (mounted) {
+        setState(() => _pendingOcrCount = _ocrQueue.length);
+      }
+    }
   }
 
   Future<String> _getVisionText(Uint8List bytes) async {
@@ -88,6 +115,12 @@ class _ScanScreenState extends State<ScanScreen> {
     return "텍스트 추출 실패";
   }
 
+  Future<void> _appendToOriginalText(String newText) async {
+    final file = File(await _getOriginalTextFilePath());
+    if (!await file.exists()) await file.create();
+    await file.writeAsString('$newText\n\n', mode: FileMode.append);
+  }
+
   Future<void> _takePictureAndProcess() async {
     if (_controller == null || !_controller!.value.isInitialized || _isAnalyzing) return;
 
@@ -96,16 +129,9 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       final photo = await _controller!.takePicture();
       final bytes = await File(photo.path).readAsBytes();
-      final text = await _getVisionText(bytes);
-      await _appendToOriginalText(text);
 
-      // ⭐⭐⭐ 마지막 부분(하단) 숫자만 추출
-      final pageNumber = _extractPageNumber(text);
-      if (pageNumber != null) {
-        final appState = AppStateScope.of(context);
-        appState.updateBookCurrentPage(widget.bookId, pageNumber);
-        debugPrint("📄 마지막 부분 페이지 감지됨 → $pageNumber 페이지로 업데이트");
-      }
+      // 즉시 UI 응답 + 백그라운드에서 OCR 처리
+      _enqueueOcr(bytes);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -124,6 +150,14 @@ class _ScanScreenState extends State<ScanScreen> {
     setState(() => _isAnalyzing = true);
 
     try {
+      // 1. 현재 대기 중인 OCR이 모두 끝날 때까지 기다림
+      if (_ocrQueue.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("OCR 처리 중... 잠시만 기다려주세요")),
+        );
+        await Future.wait(_ocrQueue); // 모든 OCR 완료 대기
+      }
+
       final filePath = await _getOriginalTextFilePath();
       final fullText = await File(filePath).exists()
           ? await File(filePath).readAsString()
@@ -198,7 +232,7 @@ $limitedText
     }
   }
 
-  /// : 마지막 8줄만 보고 페이지 번호 추출
+  /// 마지막 8줄만 보고 페이지 번호 추출 (하단 페이지 번호 인식)
   int? _extractPageNumber(String fullText) {
     if (fullText.trim().isEmpty) return null;
 
@@ -208,7 +242,7 @@ $limitedText
     int? bestPage;
 
     for (final line in lastLines) {
-      final matches = RegExp(r'\b(\d{1,3})\b').allMatches(line);  // 1~3자리 숫자만
+      final matches = RegExp(r'\b(\d{1,3})\b').allMatches(line);
 
       for (final m in matches) {
         final num = int.tryParse(m.group(1)!);
@@ -219,7 +253,6 @@ $limitedText
         }
       }
     }
-
     return bestPage;
   }
 
@@ -235,6 +268,29 @@ $limitedText
         title: Text(widget.bookTitle),
         backgroundColor: const Color(0xFFFDFBF7),
         elevation: 0,
+        actions: [
+          if (_pendingOcrCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.orange[700],
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    "OCR 대기 ${_pendingOcrCount}장",
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
       body: Stack(
         children: [
