@@ -12,8 +12,7 @@ import 'package:flutter/foundation.dart';
 import '../app_state.dart';
 import 'book_detail_screen.dart';
 
-const String _googleVisionApiKey = '';
-const String _geminiApiKey = '';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class ScanScreen extends StatefulWidget {
   final String bookId;
@@ -26,6 +25,10 @@ class ScanScreen extends StatefulWidget {
 }
 
 class _ScanScreenState extends State<ScanScreen> {
+  
+  final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
+  final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
+  
   CameraController? _controller;
   bool _isCameraInitialized = false;
   bool _isAnalyzing = false;

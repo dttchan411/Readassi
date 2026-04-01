@@ -5,8 +5,7 @@ import 'dart:convert';
 import '../app_state.dart';
 import 'scan_screen.dart';
 
-const String _kakaoApiKey = '';
-const String _googleBooksApiKey = '';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class AddBookScreen extends StatefulWidget {
   const AddBookScreen({super.key});
@@ -16,6 +15,10 @@ class AddBookScreen extends StatefulWidget {
 }
 
 class _AddBookScreenState extends State<AddBookScreen> {
+  
+  final String _kakaoApiKey = dotenv.env['_kakaoApiKey'] ?? "no key";
+  final String _googleBooksApiKey = dotenv.env['_googleVisionApiKey'] ?? "no key";
+  
   final TextEditingController _titleController = TextEditingController();
   bool _isLoading = false;
 
