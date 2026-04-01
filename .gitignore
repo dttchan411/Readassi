@@ -1,2 +1,10 @@
+.idea/
+node_modules/
+dist/
+
 .env
 .env.example
+
+readassi_flutter/.dart_tool/
+readassi_flutter/build/
+>>>>>>> 65f0da571b4b9b1ee99c5e6fdd856ace7fb54516
