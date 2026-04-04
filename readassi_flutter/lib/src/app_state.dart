@@ -104,6 +104,9 @@ class AppState extends ChangeNotifier {
         currentPage: oldBook.currentPage,
         totalPages: oldBook.totalPages,
         progress: oldBook.progress,
+        isbn: oldBook.isbn,
+        publisher: oldBook.publisher,
+        publishedDate: oldBook.publishedDate,
       );
 
       _books[index] = updatedBook;
@@ -172,11 +175,7 @@ class AppState extends ChangeNotifier {
     final index = _books.indexWhere((book) => book.id == bookId);
     if (index != -1) {
       final oldBook = _books[index];
-
-      // null이면 기존 페이지 유지 (Book 모델이 nullable일 경우도 안전)
       final int newPage = currentPage ?? oldBook.currentPage ?? 0;
-
-      // totalPages가 null일 수도 있으므로 안전하게 처리
       final int totalPages = oldBook.totalPages ?? 0;
 
       final updatedBook = Book(
@@ -189,12 +188,12 @@ class AppState extends ChangeNotifier {
         relationships: oldBook.relationships,
         keywords: oldBook.keywords,
         currentPage: newPage,
-        totalPages: oldBook.totalPages,           // 원래 값 유지
-        progress: totalPages > 0 
-            ? (newPage / totalPages * 100).round() 
-            : 0,
+        totalPages: oldBook.totalPages,
+        progress: totalPages > 0 ? (newPage / totalPages * 100).round() : 0,
+        isbn: oldBook.isbn,
+        publisher: oldBook.publisher,
+        publishedDate: oldBook.publishedDate,
       );
-
       _books[index] = updatedBook;
       _saveBooks();
       notifyListeners();
