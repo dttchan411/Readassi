@@ -84,22 +84,6 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
-  void _toggleAutoScan() {
-    setState(() {
-      _isAutoMode = !_isAutoMode;
-    });
-
-    if (_isAutoMode) {
-      _autoScanTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-        if (!_isAnalyzing) {
-          await _takePictureAndProcess();
-        }
-      });
-    } else {
-      _autoScanTimer?.cancel();
-    }
-  }
-
   // 배율 업데이트 함수
   Future<void> _updateZoom(double zoom) async {
     if (_controller == null) return;
@@ -197,9 +181,20 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Future<void> _takePictureAndProcess() async {
-    if (_controller == null ||
-        !_controller!.value.isInitialized ||
-        _isAnalyzing) return;
+    if (_controller == null || !_controller!.value.isInitialized || _isAnalyzing) return;
+
+    // 자동 촬영 시작 로직 추가
+    if (!_isAutoMode) {
+      setState(() => _isAutoMode = true);
+      _autoScanTimer = Timer.periodic(const Duration(seconds: 8), (timer) async {
+        if (!_isAnalyzing) {
+          await _takePictureAndProcess();
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("자동 촬영을 시작합니다.")),
+      );
+    }
 
     setState(() => _isAnalyzing = true);
 
@@ -223,6 +218,13 @@ class _ScanScreenState extends State<ScanScreen> {
 
   Future<void> _performUpdate() async {
     if (_isAnalyzing) return;
+    if (_isAutoMode) {
+      _autoScanTimer?.cancel();
+      setState(() => _isAutoMode = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("자동 촬영을 중단하고 업데이트를 진행합니다.")),
+      );
+    }
     setState(() => _isAnalyzing = true);
 
     try {
@@ -345,46 +347,109 @@ int? _extractPageNumberEnhanced(String fullText) {
   final appState = AppStateScope.of(context);
   final int? lastPage = appState.findBookById(widget.bookId)?.currentPage;
 
-  // 로직 고정 상태 확인
+  // 1. 로직 고정 상태 확인
   if (_lockedLocation == 'bottom') {
-    return _findValidNum(lines.sublist(lines.length - 5), lastPage);
+    return _findValidNum(lines.length > 5 ? lines.sublist(lines.length - 5) : lines, lastPage);
   } else if (_lockedLocation == 'top') {
-    return _findValidNum(lines.sublist(0, 5), lastPage, isTop: true);
+    return _findValidNum(lines.length > 5 ? lines.sublist(0, 5) : lines, lastPage, isTop: true);
   }
 
-  // 2~5단계: 상/하단 숫자 찾기
-  int? bottomNum = _getMaxNumFromLines(lines.length > 5 ? lines.sublist(lines.length - 5) : lines, regExp);
-  int? topNum = _getMaxNumFromLines(lines.length > 5 ? lines.sublist(0, 5) : lines, regExp);
+  // 2~5단계: 상/하단 숫자 및 해당 라인 정보 추출
+  final bottomData = _getMaxNumAndLine(lines.length > 5 ? lines.sublist(lines.length - 5) : lines, regExp);
+  final topData = _getMaxNumAndLine(lines.length > 5 ? lines.sublist(0, 5) : lines, regExp);
 
-  int? resultNum;
+  int? bottomNum = bottomData?['num'];
+  int? topNum = topData?['num'];
+  
+  int? candidateNum;
+  String? candidateLine;
+  bool isFromTop = false;
 
-  // 6~8단계: 우선순위 결정
+  // 6~8단계: 우선순위 결정 및 챕터 1 예외 처리
   if (bottomNum != null && topNum == null) {
-    resultNum = bottomNum;
-    _bottomHitCount++; _topHitCount = 0;
+    candidateNum = bottomNum;
+    candidateLine = bottomData!['line'];
   } else if (bottomNum == null && topNum != null) {
-    resultNum = topNum + 1; // 사용자의 +1 로직 적용
-    _topHitCount++; _bottomHitCount = 0;
+    candidateNum = topNum + 1;
+    candidateLine = topData!['line'];
+    isFromTop = true;
   } else if (bottomNum != null && topNum != null) {
-    // 이전 페이지와 차이가 적은 수 선택
-    if (lastPage == null) {
-      resultNum = bottomNum;
+    // 챕터 번호(1) 예외 로직 적용
+    if (bottomNum == 1 && topNum != 1) {
+      candidateNum = topNum + 1;
+      candidateLine = topData!['line'];
+      isFromTop = true;
+    } else if (topNum == 1 && bottomNum != 1) {
+      candidateNum = bottomNum;
+      candidateLine = bottomData!['line'];
     } else {
-      resultNum = (bottomNum - lastPage).abs() <= (topNum - lastPage).abs() ? bottomNum : topNum;
+      // 둘 다 1이 아니거나 둘 다 1인 경우: 이전 페이지와 차이가 적은 수 선택
+      int processedTop = topNum + 1;
+      if (lastPage == null || (bottomNum - lastPage).abs() <= (processedTop - lastPage).abs()) {
+        candidateNum = bottomNum;
+        candidateLine = bottomData!['line'];
+      } else {
+        candidateNum = processedTop;
+        candidateLine = topData!['line'];
+        isFromTop = true;
+      }
     }
   }
 
-  // 로직 고정 처리 (연속 5회 발생 시)
+  // 결과값이 없으면 종료
+  if (candidateNum == null || candidateLine == null) {
+    debugPrint("⚠️ 후보 숫자를 찾지 못했습니다.");
+    return null;
+  }
+
+  debugPrint("🔍 검증 시작 - 후보: $candidateNum, 줄 내용: '$candidateLine'");
+
+  // 9단계: 숫자 비중(Dominance) 검증
+  String cleanLine = candidateLine.replaceAll(RegExp(r'\s+'), '');
+  int rawNumInText = isFromTop ? candidateNum - 1 : candidateNum;
+  if (cleanLine.length > rawNumInText.toString().length + 2) {
+    debugPrint("❌ Step 9 실패: 숫자가 줄에서 차지하는 비중이 낮음 (길이: ${cleanLine.length})");
+    return null;
+  }
+
+  // 10단계: 범위 검증 (+10 조건)
+  if (lastPage != null && lastPage != 0 && candidateNum > lastPage + 10) {
+    debugPrint("❌ Step 10 실패: 현재 페이지($lastPage)보다 10 이상 큼");
+    return null;
+  }
+
+  debugPrint("✅ 페이지 검출 성공: $candidateNum (출처: ${isFromTop ? '상단' : '하단'})");
+
+  // 모든 검증 통과 시 카운트 업데이트 및 고정
+  if (isFromTop) {
+    _topHitCount++;
+    _bottomHitCount = 0;
+  } else {
+    _bottomHitCount++;
+    _topHitCount = 0;
+  }
+
   if (_bottomHitCount >= 5) _lockedLocation = 'bottom';
   if (_topHitCount >= 5) _lockedLocation = 'top';
 
-  // 9~10단계: 숫자 비중 및 범위 검증 (+10 조건)
-  if (resultNum != null) {
-    if (lastPage != null && resultNum > lastPage + 10) return null;
-    return resultNum;
+  return candidateNum;
+}
+
+// 헬퍼 함수 추가: 숫자와 해당 라인을 함께 반환
+Map<String, dynamic>? _getMaxNumAndLine(List<String> targetLines, RegExp reg) {
+  int? max;
+  String? maxLine;
+  for (var line in targetLines) {
+    final matches = reg.allMatches(line);
+    for (var m in matches) {
+      int n = int.parse(m.group(1)!);
+      if (max == null || n > max) {
+        max = n;
+        maxLine = line;
+      }
+    }
   }
-  
-  return null;
+  return (max != null) ? {'num': max, 'line': maxLine} : null;
 }
 
 // 특정 줄 범위에서 가장 큰 숫자를 찾는 보조 함수
@@ -406,18 +471,23 @@ int? _getMaxNumFromLines(List<String> targetLines, RegExp reg) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    final book = AppStateScope.of(context).findBookById(widget.bookId);
+    final currentPage = book?.currentPage ?? 0;
+
     return Scaffold(
       backgroundColor: const Color(0xFFFDFBF7),
       appBar: AppBar(
-        title: Text(widget.bookTitle),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.bookTitle, style: const TextStyle(fontSize: 18)),
+            Text("현재 인식된 페이지: $currentPage P", 
+                style: const TextStyle(fontSize: 12, color: Colors.orange)),
+          ],
+        ),
         backgroundColor: const Color(0xFFFDFBF7),
         elevation: 0,
         actions: [
-          IconButton(
-            icon: Icon(_isAutoMode ? Icons.auto_mode : Icons.not_started_outlined),
-            color: _isAutoMode ? Colors.green : null,
-            onPressed: _toggleAutoScan,
-          ),
           if (_pendingOcrCount > 0)
             Padding(
               padding: const EdgeInsets.only(right: 16),
@@ -594,7 +664,7 @@ int? _getMaxNumFromLines(List<String> targetLines, RegExp reg) {
           int processedNum = isTop ? num + 1 : num;
 
           // 현재 페이지 + 10 이내 검증 (10번 조건)
-          if (lastPage == null || processedNum <= lastPage + 10) {
+          if (lastPage == null || lastPage == 0 || processedNum <= lastPage + 10) {
             if (bestNum == null || processedNum > bestNum) {
               bestNum = processedNum;
             }
