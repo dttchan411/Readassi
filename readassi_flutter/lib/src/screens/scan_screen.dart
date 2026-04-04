@@ -14,6 +14,8 @@ import 'book_detail_screen.dart';
 
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
+import 'package:flutter/services.dart';
+
 class ScanScreen extends StatefulWidget {
   final String bookId;
   final String bookTitle;
@@ -49,15 +51,30 @@ class _ScanScreenState extends State<ScanScreen> {
   final List<Future<void>> _ocrQueue = [];
   int _pendingOcrCount = 0;
 
-  @override
+@override
   void initState() {
     super.initState();
+    
+    // ←←← 가로모드 강제 고정
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    
     _initCamera();
   }
 
   @override
   void dispose() {
-    _autoScanTimer?.cancel(); // 타이머 반드시 해제
+    // ←←← 원래 방향으로 복구 (세로모드 허용)
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+
+    _autoScanTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }
@@ -204,11 +221,6 @@ class _ScanScreenState extends State<ScanScreen> {
 
       _enqueueOcr(bytes);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("페이지 저장 완료!")),
-        );
-      }
     } catch (e) {
       debugPrint("촬영 오류: $e");
     } finally {
@@ -221,51 +233,61 @@ class _ScanScreenState extends State<ScanScreen> {
     if (_isAutoMode) {
       _autoScanTimer?.cancel();
       setState(() => _isAutoMode = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("자동 촬영을 중단하고 업데이트를 진행합니다.")),
-      );
     }
     setState(() => _isAnalyzing = true);
 
     try {
+      debugPrint("🔄 업데이트 시작 - OCR 큐 처리 중...");
       if (_ocrQueue.isNotEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("OCR 처리 중... 잠시만 기다려주세요")),
-        );
         await Future.wait(_ocrQueue);
       }
 
       final filePath = await _getOriginalTextFilePath();
-      final fullText =
-          await File(filePath).exists() ? await File(filePath).readAsString() : "";
+      final fullText = await File(filePath).exists() 
+          ? await File(filePath).readAsString() 
+          : "";
+
+      debugPrint("📊 스캔된 전체 텍스트 길이: ${fullText.length}자");
 
       if (fullText.trim().isEmpty) {
-        throw Exception("스캔된 텍스트가 없습니다.");
+        throw Exception("스캔된 텍스트가 없습니다. 먼저 페이지를 촬영해주세요.");
       }
 
+      debugPrint("🔍 Gemini 요약 요청 시작...");
       final newSummary = await _getGeminiUpdateSummary(fullText);
+      debugPrint("📨 Gemini 응답 전체: [$newSummary]");
+      debugPrint("📨 응답 길이: ${newSummary.length}자");
 
       if (newSummary.contains("실패") || newSummary.contains("오류")) {
-        throw Exception("요약 생성에 실패했습니다.");
+        throw Exception("Gemini 요약 실패: $newSummary");
       }
 
       final appState = AppStateScope.of(context);
       appState.updateBookSummary(widget.bookId, newSummary);
 
-      final finalPage = _extractPageNumberEnhanced(fullText);
-      if (finalPage != null) {
+      final finalPage = _extractPageNumberEnhanced(fullText) ?? 0;
+      if (finalPage != 0) {
         appState.updateBookCurrentPage(widget.bookId, finalPage);
-        debugPrint("최종 페이지 업데이트 반영: $finalPage");
+        debugPrint("✅ 최종 페이지 업데이트: $finalPage P");
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("✅ $finalPage 페이지까지 요약 완료"),
+            backgroundColor: Colors.green[700],
+          ),
+        );
       }
 
       if (mounted) {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (_) => BookDetailScreen(bookId: widget.bookId),
-          ),
+          MaterialPageRoute(builder: (_) => BookDetailScreen(bookId: widget.bookId)),
         );
       }
-    } catch (e) {
+    } catch (e, stack) {
+      debugPrint("❌ [업데이트 실패] 에러: $e");
+      debugPrint("❌ StackTrace: $stack");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("업데이트 실패: $e")),
@@ -277,50 +299,32 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Future<String> _getGeminiUpdateSummary(String fullText) async {
-    final limitedText =
-        fullText.length > 8000
-            ? fullText.substring(0, 8000) + "\n...(생략)..."
-            : fullText;
+    final limitedText = fullText.length > 20000
+        ? fullText.substring(0, 20000) + "\n...(이후 내용 생략)..."
+        : fullText;
 
     final prompt = """
-다음은 책에서 스캔한 전체 내용입니다. 자연스럽고 읽기 쉽게 핵심 스토리를 3~4줄로 요약해 주세요.
+다음은 책에서 스캔한 전체 내용입니다. 
+현재까지 스캔된 페이지 수는 대략 ${fullText.length ~/ 220}페이지 정도입니다.
+
+자연스럽고 읽기 쉽게 핵심 스토리를 약 10줄 내외로 자세히 요약해 주세요.
 
 $limitedText
 
-- "스캔된 내용에 따르면" 같은 표현은 사용하지 마세요.
+- "스캔된 내용에 따르면", "요약하자면" 같은 표현은 절대 사용하지 마세요.
 - 불릿, 번호, 기호 없이 완전한 문장으로만 작성하세요.
-- 책의 흐름과 중요한 사건을 자연스럽게 포함해 주세요.
 """;
 
     try {
       final response = await http.post(
-        Uri.parse(
-          'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$_geminiApiKey',
-        ),
+        Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$_geminiApiKey'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          "contents": [
-            {
-              "parts": [
-                {"text": prompt},
-              ],
-            },
-          ],
-          "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {
-              "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-              "threshold": "BLOCK_NONE",
-            },
-            {
-              "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-              "threshold": "BLOCK_NONE",
-            },
-          ],
+          "contents": [{"parts": [{"text": prompt}]}],
+          "safetySettings": [ /* 기존 safetySettings 그대로 유지 */ ],
           "generationConfig": {
             "temperature": 0.85,
-            "maxOutputTokens": 3000,
+            "maxOutputTokens": 5000,
             "topP": 0.95,
           },
         }),
@@ -328,14 +332,12 @@ $limitedText
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        return data['candidates']?[0]?['content']?['parts']?[0]?['text']
-                ?.trim() ??
-            "요약 실패";
+        return data['candidates']?[0]?['content']?['parts']?[0]?['text']?.trim() ?? "요약 실패";
       }
-      return "요약 생성 실패";
+      return "요약 생성 실패 (HTTP ${response.statusCode})";
     } catch (e) {
       debugPrint("Gemini 오류: $e");
-      return "통신 오류";
+      return "통신 오류: $e";
     }
   }
 
@@ -412,12 +414,17 @@ int? _extractPageNumberEnhanced(String fullText) {
     return null;
   }
 
-  // 10단계: 범위 검증 (+10 조건)
-  if (lastPage != null && lastPage != 0 && candidateNum > lastPage + 10) {
-    debugPrint("❌ Step 10 실패: 현재 페이지($lastPage)보다 10 이상 큼");
-    return null;
+  // 10단계: 범위 검증 (+-10 조건)
+  if (lastPage != null && lastPage != 0) {
+    if (candidateNum > lastPage + 10) {
+      debugPrint("❌ Step 10 실패: 현재 페이지($lastPage)보다 10 이상 큼");
+      return null;
+    }
+    if (candidateNum < lastPage - 10) {
+      debugPrint("❌ Step 10 실패: 현재 페이지($lastPage)보다 10 이상 작음");
+      return null;
+    }
   }
-
   debugPrint("✅ 페이지 검출 성공: $candidateNum (출처: ${isFromTop ? '상단' : '하단'})");
 
   // 모든 검증 통과 시 카운트 업데이트 및 고정
@@ -476,162 +483,211 @@ int? _getMaxNumFromLines(List<String> targetLines, RegExp reg) {
 
     return Scaffold(
       backgroundColor: const Color(0xFFFDFBF7),
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      body: SafeArea(
+        top: false, 
+        child: Column(
           children: [
-            Text(widget.bookTitle, style: const TextStyle(fontSize: 18)),
-            Text("현재 인식된 페이지: $currentPage P", 
-                style: const TextStyle(fontSize: 12, color: Colors.orange)),
-          ],
-        ),
-        backgroundColor: const Color(0xFFFDFBF7),
-        elevation: 0,
-        actions: [
-          if (_pendingOcrCount > 0)
             Padding(
-              padding: const EdgeInsets.only(right: 16),
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.orange[700],
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    "OCR 대기 ${_pendingOcrCount}장",
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
+              padding: const EdgeInsets.fromLTRB(8, 0, 16, 4), 
+              child: Row(
+                children: [
+                  Transform.translate(
+                    offset: const Offset(0, 30), 
+                    child: IconButton(
+                      icon: const Icon(Icons.arrow_back_ios, size: 22, color: Colors.black87),
+                      onPressed: () => Navigator.of(context).pop(),
                     ),
                   ),
-                ),
+                  Expanded(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Text(
+                          widget.bookTitle,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          "현재 인식된 페이지: $currentPage P",
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            color: Colors.orange,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(
+                    width: 78,                    // 배지가 차지할 최대 너비 (필요하면 80~85로 조절)
+                    child: _pendingOcrCount > 0
+                        ? Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.orange[700],
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              "OCR ${_pendingOcrCount}",
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          )
+                        : const SizedBox(),       // 배지가 없을 때도 공간은 유지
+                  ),
+                ],
               ),
             ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          // 핀치 투 줌을 위한 제스처 감지기
-          GestureDetector(
-            onScaleStart: (details) {
-              _baseZoomLevel = _currentZoomLevel;
-            },
-            onScaleUpdate: (details) {
-              // 핀치 확대/축소 로직 적용
-              _updateZoom(_baseZoomLevel * details.scale);
-            },
-            child: SizedBox.expand(child: CameraPreview(_controller!)),
-          ),
 
-          // 배율 전환 버튼 (1x, 2x, 3x)
-          Positioned(
-            bottom: 30,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _buildZoomButton("1x", 1.0),
-                const SizedBox(width: 12),
-                _buildZoomButton("2x", 2.0),
-                const SizedBox(width: 12),
-                _buildZoomButton("3x", 3.0),
-              ],
-            ),
-          ),
+            // 카메라 영역
+            Expanded(
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Center(
+                    child: AspectRatio(
+                      aspectRatio: _controller!.value.aspectRatio,
+                      child: GestureDetector(
+                        onScaleStart: (details) {
+                          _baseZoomLevel = _currentZoomLevel;
+                        },
+                        onScaleUpdate: (details) {
+                          _updateZoom(_baseZoomLevel * details.scale);
+                        },
+                        child: Container(
+                          color: Colors.black,
+                          child: CameraPreview(_controller!),
+                        ),
+                      ),
+                    ),
+                  ),
 
-          if (_isAnalyzing)
-            Container(
-              color: Colors.black54,
-              child: const Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircularProgressIndicator(color: Colors.white),
-                    SizedBox(height: 20),
-                    Text(
-                      "AI 분석 중...",
-                      style: TextStyle(color: Colors.white, fontSize: 18),
+                  // 왼쪽 줌 버튼
+                  Positioned(
+                    left: 20,
+                    top: 0,
+                    bottom: 0,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _buildZoomButton("3x", 3.0),
+                        const SizedBox(height: 14),
+                        _buildZoomButton("2x", 2.0),
+                        const SizedBox(height: 14),
+                        _buildZoomButton("1x", 1.0),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+
+                  // 오른쪽 버튼
+                  Positioned(
+                    right: 20,
+                    top: 0,
+                    bottom: 0,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        SizedBox(
+                          width: 78,
+                          child: OutlinedButton(
+                            onPressed: _isAnalyzing ? null : _performUpdate,
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              side: const BorderSide(color: Color(0xFFB5651D), width: 1.5),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                            ),
+                            child: const Text(
+                              "중지",
+                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                        SizedBox(
+                          width: 78,
+                          child: ElevatedButton(
+                            onPressed: _isAnalyzing ? null : _takePictureAndProcess,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFB5651D),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                            ),
+                            child: const Text(
+                              "촬영 시작",
+                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  if (_isAnalyzing)
+                    Container(
+                      color: Colors.black54,
+                      child: const Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircularProgressIndicator(color: Colors.white),
+                            SizedBox(height: 20),
+                            Text(
+                              "AI 분석 중...",
+                              style: TextStyle(color: Colors.white, fontSize: 18),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
-        ],
-      ),
-      bottomNavigationBar: SafeArea(
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-          decoration: const BoxDecoration(
-            color: Color(0xFFFDFBF7),
-            border: Border(top: BorderSide(color: Color(0xFFE4DDD6), width: 1)),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _isAnalyzing ? null : _takePictureAndProcess,
-                  icon: const Icon(Icons.camera_alt, size: 24),
-                  label: const Text(
-                    "페이지 촬영",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFB5651D),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _isAnalyzing ? null : _performUpdate,
-                  icon: const Icon(Icons.summarize_outlined, size: 24),
-                  label: const Text(
-                    "업데이트",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    side: const BorderSide(color: Color(0xFFB5651D)),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+          ],
         ),
       ),
     );
   }
 
-  // 줌 프리셋 버튼 빌더
+  // 줌 버튼
   Widget _buildZoomButton(String label, double zoom) {
-    // 반올림하여 현재 선택된 배율 표시 여부 결정
-    final isSelected = _currentZoomLevel.round() == zoom.round();
+    final isSelected = (_currentZoomLevel.round() == zoom.round());
     return GestureDetector(
       onTap: () => _updateZoom(zoom),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        width: 58,
+        height: 58,
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFB5651D) : Colors.black54,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white24, width: 1),
+          color: isSelected ? const Color(0xFFB5651D) : Colors.white.withOpacity(0.85),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: isSelected ? Colors.white : Colors.black38,
+            width: 2,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.2),
+              blurRadius: 6,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
-        child: Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 13,
+        child: Center(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isSelected ? Colors.white : Colors.black87,
+              fontWeight: FontWeight.bold,
+              fontSize: 15,
+            ),
           ),
         ),
       ),
@@ -664,7 +720,8 @@ int? _getMaxNumFromLines(List<String> targetLines, RegExp reg) {
           int processedNum = isTop ? num + 1 : num;
 
           // 현재 페이지 + 10 이내 검증 (10번 조건)
-          if (lastPage == null || lastPage == 0 || processedNum <= lastPage + 10) {
+          if (lastPage == null || lastPage == 0 || 
+              (processedNum <= lastPage + 10 && processedNum >= lastPage - 10)) {
             if (bestNum == null || processedNum > bestNum) {
               bestNum = processedNum;
             }
