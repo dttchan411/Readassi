@@ -77,12 +77,12 @@ class _AddBookScreenState extends State<AddBookScreen> {
     }
   }
 
-  Future<Map<String, dynamic>?> _searchKakao(String query) async {
+  Future<Map<String, dynamic>?> _searchKakao(String isbn) async {
     try {
       final response = await http.get(
-        Uri.parse('https://dapi.kakao.com/v3/search/book.json?query=${Uri.encodeComponent(query)}'),
+        Uri.parse('https://dapi.kakao.com/v3/search/book.json?query=$isbn&target=isbn'),
         headers: {'Authorization': 'KakaoAK $_kakaoApiKey'},
-      );
+    );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -97,16 +97,16 @@ class _AddBookScreenState extends State<AddBookScreen> {
         };
       }
     } catch (e) {
-      debugPrint("Kakao API 오류: $e");
+      debugPrint("Kakao ISBN 검색 오류: $e");
     }
     return null;
   }
 
-  Future<Map<String, dynamic>?> _searchGoogle(String query) async {
+  Future<Map<String, dynamic>?> _searchGoogle(String isbn) async {
     try {
       final response = await http.get(
-        Uri.parse('https://www.googleapis.com/books/v1/volumes?q=${Uri.encodeComponent(query)}&key=$_googleBooksApiKey'),
-      );
+        Uri.parse('https://www.googleapis.com/books/v1/volumes?q=isbn:$isbn&key=$_googleBooksApiKey'),
+    );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -121,7 +121,7 @@ class _AddBookScreenState extends State<AddBookScreen> {
         };
       }
     } catch (e) {
-      debugPrint("Google Books API 오류: $e");
+      debugPrint("Google ISBN 검색 오류: $e");
     }
     return null;
   }

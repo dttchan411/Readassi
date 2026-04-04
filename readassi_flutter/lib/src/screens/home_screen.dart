@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'continue_reading_screen.dart';
-import 'add_book_screen.dart'; // [수정] 스캔 대신 제목 입력 화면 임포트
+import 'barcode_scan_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -62,19 +62,16 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   _MenuCard(
                     title: '새로 책 읽기',
-                    description: '새로운 책을 등록하고 카메라로 스캔을 시작합니다.', // 설명 살짝 수정
-                    icon: Icons.add,
+                    description: '책 바코드를 스캔하여 바로 등록합니다.',
+                    icon: Icons.qr_code_scanner_rounded,
                     accent: const Color(0xFFFFF0D9),
                     onTap: () async {
-                      // [핵심 수정] 바로 ScanScreen으로 가지 않고 AddBookScreen으로 보냅니다.
                       await Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => const AddBookScreen(),
+                          builder: (_) => const BarcodeScanScreen(), // 바코드 스캔 화면으로 이동
                         ),
                       );
-                      if (mounted) {
-                        setState(() {});
-                      }
+                      if (mounted) setState(() {});
                     },
                   ),
                   const SizedBox(height: 18),

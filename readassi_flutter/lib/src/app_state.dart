@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models/book.dart';
 import 'models/mock_books.dart';
 
+
 class AppState extends ChangeNotifier {
   AppState() : _books = List<Book>.from(mockBooks) {
     _loadBooks();
@@ -38,6 +39,36 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     
     return newId; 
+  }
+
+  String addBookWithFullInfo({
+    required String title,
+    required String author,
+    String coverUrl = '',
+    String summary = '',
+    int? totalPages,
+  }) {
+    final String newId = DateTime.now().millisecondsSinceEpoch.toString();
+
+    final newBook = Book(
+      id: newId,
+      title: title,
+      author: author,
+      coverUrl: coverUrl,
+      summary: summary,
+      characters: [],           // ← Book 모델에 맞게 빈 리스트
+      relationships: [],
+      keywords: [],
+      currentPage: 0,
+      totalPages: totalPages ?? 0,
+      progress: 0,
+    );
+
+    _books.insert(0, newBook);
+    _saveBooks();
+    notifyListeners();
+
+    return newId;
   }
 
   void deleteBook(String bookId) {
