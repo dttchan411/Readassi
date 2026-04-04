@@ -160,19 +160,21 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               children: [
                 Text(
                   '줄거리',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
                 ),
-                const SizedBox(height: 14),
-                Text(
-                  book.summary,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyLarge?.copyWith(height: 1.7),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 460,                
+                  child: SingleChildScrollView(
+                    child: Text(
+                      book.summary.isEmpty ? '아직 요약이 없습니다.' : book.summary,
+                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.75),
+                    ),
+                  ),
                 ),
+
                 if (book.keywords.isNotEmpty) ...[
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 24),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
@@ -526,4 +528,28 @@ class _ChatMessage {
 
   final ChatRole role;
   final String content;
+}
+
+class _MetaInfo extends StatelessWidget {
+  const _MetaInfo({required this.label, required this.value, super.key});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          '$label: ',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFF7D746C)),
+        ),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+        ),
+      ],
+    );
+  }
 }

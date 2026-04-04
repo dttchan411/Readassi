@@ -145,15 +145,28 @@ class _ContinueReadingScreenState extends State<ContinueReadingScreen> {
                                         ?.copyWith(fontWeight: FontWeight.w700),
                                   ),
                                   const SizedBox(height: 4),
+
+                                  // ← 저자: 형식으로 변경
                                   Text(
-                                    book.author,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .bodyMedium
-                                        ?.copyWith(
+                                    '저자: ${book.author}',
+                                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                           color: const Color(0xFF7D746C),
                                         ),
                                   ),
+
+                                  // ← 출판사: 형식으로 추가
+                                  if (book.publisher != null && book.publisher!.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Text(
+                                        '출판사: ${book.publisher}',
+                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                              color: const Color(0xFF9C8E7E),
+                                              fontSize: 13,
+                                            ),
+                                      ),
+                                    ),
+
                                   const SizedBox(height: 12),
                                   BookProgressBar(book: book),
                                 ],

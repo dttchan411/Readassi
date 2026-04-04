@@ -41,11 +41,14 @@ class AppState extends ChangeNotifier {
     return newId; 
   }
 
-  String addBookWithFullInfo({
+    String addBookWithFullInfo({
     required String title,
     required String author,
     String coverUrl = '',
-    String summary = '',
+    String summary = '',           // ← Google description 넣을 곳
+    String? isbn,
+    String? publisher,
+    String? publishedDate,
     int? totalPages,
   }) {
     final String newId = DateTime.now().millisecondsSinceEpoch.toString();
@@ -55,8 +58,11 @@ class AppState extends ChangeNotifier {
       title: title,
       author: author,
       coverUrl: coverUrl,
-      summary: summary,
-      characters: [],           // ← Book 모델에 맞게 빈 리스트
+      summary: summary,                    
+      isbn: isbn,
+      publisher: publisher,
+      publishedDate: publishedDate,
+      characters: [],
       relationships: [],
       keywords: [],
       currentPage: 0,

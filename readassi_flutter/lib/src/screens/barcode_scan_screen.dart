@@ -60,7 +60,10 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
           title: info['title'] ?? '제목 없음',
           author: info['author'] ?? '작자 미상',
           coverUrl: info['coverUrl'] ?? '',
-          summary: '', // 나중에 스캔하면서 채움
+          summary: '',
+          isbn: info['isbn'],
+          publisher: info['publisher'],
+          publishedDate: info['publishedDate'],
           totalPages: info['totalPages'],
         );
 
@@ -116,7 +119,10 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
           'title': book['title'] ?? '',
           'author': (book['authors'] as List<dynamic>?)?.join(', ') ?? '작자 미상',
           'coverUrl': book['thumbnail'] ?? '',
-          'totalPages': null, // 카카오는 페이지 수 안 줌
+          'isbn': book['isbn'] ?? isbn,
+          'publisher': book['publisher'] ?? '',
+          'publishedDate': book['datetime']?.substring(0, 10), // YYYY-MM-DD
+          'description': book['contents'] ?? '',
         };
       }
     } catch (e) {
@@ -141,7 +147,10 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
           'title': volumeInfo['title'] ?? '',
           'author': (volumeInfo['authors'] as List<dynamic>?)?.join(', ') ?? '작자 미상',
           'coverUrl': volumeInfo['imageLinks']?['thumbnail'] ?? '',
-          'totalPages': volumeInfo['pageCount'],
+          'isbn': isbn,
+          'publisher': volumeInfo['publisher'] ?? '',
+          'publishedDate': volumeInfo['publishedDate'],
+          'description': volumeInfo['description'] ?? '',   // ← 이게 제일 중요
         };
       }
     } catch (e) {

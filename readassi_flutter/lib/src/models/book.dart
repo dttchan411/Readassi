@@ -71,6 +71,10 @@ class Book {
     this.currentPage,
     this.totalPages,
     this.progress,
+    this.isbn,           // ← 새로 추가
+    this.publisher,      // ← 새로 추가
+    this.publishedDate,  // ← 새로 추가
+    this.description,    // ← 새로 추가 (Google/Kakao에서 가져온 원문 설명)
   });
 
   final String id;
@@ -84,6 +88,12 @@ class Book {
   final int? currentPage;
   final int? totalPages;
   final int? progress;
+
+  // 새로 추가된 필드들
+  final String? isbn;
+  final String? publisher;
+  final String? publishedDate;
+  final String? description;
 
   Map<String, dynamic> toJson() {
     return {
@@ -100,6 +110,10 @@ class Book {
       'currentPage': currentPage,
       'totalPages': totalPages,
       'progress': progress,
+      'isbn': isbn,                    // ← 추가
+      'publisher': publisher,          // ← 추가
+      'publishedDate': publishedDate,  // ← 추가
+      'description': description,      // ← 추가
     };
   }
 
@@ -114,20 +128,21 @@ class Book {
           .map((keyword) => keyword as String)
           .toList(),
       characters: (json['characters'] as List<dynamic>? ?? const [])
-          .map(
-            (character) =>
-                Character.fromJson(character as Map<String, dynamic>),
-          )
+          .map((character) =>
+              Character.fromJson(character as Map<String, dynamic>))
           .toList(),
       relationships: (json['relationships'] as List<dynamic>? ?? const [])
-          .map(
-            (relationship) =>
-                Relationship.fromJson(relationship as Map<String, dynamic>),
-          )
+          .map((relationship) =>
+              Relationship.fromJson(relationship as Map<String, dynamic>))
           .toList(),
       currentPage: json['currentPage'] as int?,
       totalPages: json['totalPages'] as int?,
       progress: json['progress'] as int?,
+      // 새 필드들 (기존 저장된 책들은 null로 들어옴)
+      isbn: json['isbn'] as String?,
+      publisher: json['publisher'] as String?,
+      publishedDate: json['publishedDate'] as String?,
+      description: json['description'] as String?,
     );
   }
 
