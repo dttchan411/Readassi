@@ -5,6 +5,7 @@ import '../models/book.dart';
 import '../services/claude_service.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/chat_bubble.dart';
+import 'character_profile_screen.dart';
 
 class BookDetailScreen extends StatefulWidget {
   const BookDetailScreen({required this.bookId, super.key});
@@ -160,15 +161,19 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               children: [
                 Text(
                   '줄거리',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
-                  height: 460,                
+                  height: 460,
                   child: SingleChildScrollView(
                     child: Text(
                       book.summary.isEmpty ? '아직 요약이 없습니다.' : book.summary,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.75),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodyLarge?.copyWith(height: 1.75),
                     ),
                   ),
                 ),
@@ -198,52 +203,79 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                   padding: const EdgeInsets.only(bottom: 14),
                   child: Card(
                     margin: EdgeInsets.zero,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          BookCover(
-                            imageUrl: character.imageUrl,
-                            width: 64,
-                            height: 64,
-                            borderRadius: 18,
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  character.name,
-                                  style: Theme.of(context).textTheme.titleMedium
-                                      ?.copyWith(fontWeight: FontWeight.w700),
-                                ),
-                                const SizedBox(height: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFF3EFE8),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Text(character.role),
-                                ),
-                                const SizedBox(height: 10),
-                                Text(
-                                  character.description,
-                                  style: Theme.of(context).textTheme.bodyMedium
-                                      ?.copyWith(
-                                        height: 1.5,
-                                        color: const Color(0xFF6F675F),
-                                      ),
-                                ),
-                              ],
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => CharacterProfileScreen(
+                              book: book,
+                              character: character,
                             ),
                           ),
-                        ],
+                        );
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            BookCover(
+                              imageUrl: character.imageUrl,
+                              width: 64,
+                              height: 64,
+                              borderRadius: 18,
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    character.name,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(fontWeight: FontWeight.w700),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFF3EFE8),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(character.role),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    character.description,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(
+                                          height: 1.5,
+                                          color: const Color(0xFF6F675F),
+                                        ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  const Text(
+                                    '프로필 보기',
+                                    style: TextStyle(
+                                      color: Color(0xFF9C5B22),
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -543,11 +575,15 @@ class _MetaInfo extends StatelessWidget {
       children: [
         Text(
           '$label: ',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFF7D746C)),
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: const Color(0xFF7D746C)),
         ),
         Text(
           value,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
         ),
       ],
     );

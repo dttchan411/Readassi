@@ -4,7 +4,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models/book.dart';
 import 'models/mock_books.dart';
 
-
 class AppState extends ChangeNotifier {
   AppState() : _books = List<Book>.from(mockBooks) {
     _loadBooks();
@@ -19,7 +18,7 @@ class AppState extends ChangeNotifier {
 
   String addBook(String title) {
     final String newId = DateTime.now().millisecondsSinceEpoch.toString();
-    
+
     final newBook = Book(
       id: newId,
       title: title,
@@ -37,15 +36,15 @@ class AppState extends ChangeNotifier {
     _books.insert(0, newBook);
     _saveBooks();
     notifyListeners();
-    
-    return newId; 
+
+    return newId;
   }
 
-    String addBookWithFullInfo({
+  String addBookWithFullInfo({
     required String title,
     required String author,
     String coverUrl = '',
-    String summary = '',           // ← Google description 넣을 곳
+    String summary = '', // ← Google description 넣을 곳
     String? isbn,
     String? publisher,
     String? publishedDate,
@@ -58,7 +57,7 @@ class AppState extends ChangeNotifier {
       title: title,
       author: author,
       coverUrl: coverUrl,
-      summary: summary,                    
+      summary: summary,
       isbn: isbn,
       publisher: publisher,
       publishedDate: publishedDate,
@@ -107,6 +106,7 @@ class AppState extends ChangeNotifier {
         isbn: oldBook.isbn,
         publisher: oldBook.publisher,
         publishedDate: oldBook.publishedDate,
+        description: oldBook.description,
       );
 
       _books[index] = updatedBook;
@@ -114,6 +114,57 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  void updateBookCharacters(String bookId, List<dynamic> rawCharacters) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index == -1) return;
+
+    final oldBook = _books[index];
+    final existingByName = {
+      for (final character in oldBook.characters) character.name: character,
+    };
+
+    final characters = rawCharacters.whereType<Map<String, dynamic>>().map((
+      item,
+    ) {
+      final name = (item['name'] as String? ?? '').trim();
+      final role = (item['role'] as String? ?? '등장인물').trim();
+      final description = (item['description'] as String? ?? '아직 상세 프로필이 없습니다.')
+          .trim();
+
+      final existing = existingByName[name];
+      return Character(
+        id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
+        name: name.isEmpty ? '이름 미상' : name,
+        role: role.isEmpty ? '등장인물' : role,
+        description: description.isEmpty ? '아직 상세 프로필이 없습니다.' : description,
+        imageUrl: existing?.imageUrl ?? '',
+      );
+    }).toList();
+
+    final updatedBook = Book(
+      id: oldBook.id,
+      title: oldBook.title,
+      author: oldBook.author,
+      coverUrl: oldBook.coverUrl,
+      summary: oldBook.summary,
+      characters: characters,
+      relationships: oldBook.relationships,
+      keywords: oldBook.keywords,
+      currentPage: oldBook.currentPage,
+      totalPages: oldBook.totalPages,
+      progress: oldBook.progress,
+      isbn: oldBook.isbn,
+      publisher: oldBook.publisher,
+      publishedDate: oldBook.publishedDate,
+      description: oldBook.description,
+    );
+
+    _books[index] = updatedBook;
+    _saveBooks();
+    notifyListeners();
+  }
+
   /// Kakao/Google에서 가져온 정보로 책 정보 일괄 업데이트
   void updateBookInfo({
     required String bookId,
@@ -138,6 +189,10 @@ class AppState extends ChangeNotifier {
       currentPage: oldBook.currentPage,
       totalPages: totalPages ?? oldBook.totalPages,
       progress: oldBook.progress,
+      isbn: oldBook.isbn,
+      publisher: oldBook.publisher,
+      publishedDate: oldBook.publishedDate,
+      description: oldBook.description,
     );
 
     _books[index] = updatedBook;
@@ -162,6 +217,10 @@ class AppState extends ChangeNotifier {
         currentPage: oldBook.currentPage,
         totalPages: oldBook.totalPages,
         progress: oldBook.progress,
+        isbn: oldBook.isbn,
+        publisher: oldBook.publisher,
+        publishedDate: oldBook.publishedDate,
+        description: oldBook.description,
       );
 
       _books[index] = updatedBook;
@@ -169,7 +228,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     }
   }
-  
+
   /// 업데이트 버튼을 눌렀을 때 마지막 페이지 번호도 함께 업데이트
   void updateBookCurrentPage(String bookId, int? currentPage) {
     final index = _books.indexWhere((book) => book.id == bookId);
@@ -229,7 +288,9 @@ class AppState extends ChangeNotifier {
             decoded.map((item) => Book.fromJson(item as Map<String, dynamic>)),
           );
       } catch (_) {
-        _books..clear()..addAll(mockBooks);
+        _books
+          ..clear()
+          ..addAll(mockBooks);
       }
     }
 

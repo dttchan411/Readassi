@@ -69,7 +69,11 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) return;
-      _controller = CameraController(cameras.first, ResolutionPreset.medium, enableAudio: false);
+      _controller = CameraController(
+        cameras.first,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
       await _controller!.initialize();
 
       _minZoomLevel = await _controller!.getMinZoomLevel();
@@ -98,11 +102,20 @@ class _ScanScreenState extends State<ScanScreen> {
     final dir = await getApplicationDocumentsDirectory();
     final bookDir = Directory(p.join(dir.path, 'books'));
     await bookDir.create(recursive: true);
-    
+
     return {
-      'original': p.join(bookDir.path, '${widget.bookId}_original.txt'), // 원본 텍스트(분석 후 삭제됨)
-      'story_db': p.join(bookDir.path, '${widget.bookId}_story_db.json'), // AI 내부 참고용 상세 줄거리 DB
-      'char_db': p.join(bookDir.path, '${widget.bookId}_char_db.json'),   // AI 내부 참고용 상세 인물 DB
+      'original': p.join(
+        bookDir.path,
+        '${widget.bookId}_original.txt',
+      ), // 원본 텍스트(분석 후 삭제됨)
+      'story_db': p.join(
+        bookDir.path,
+        '${widget.bookId}_story_db.json',
+      ), // AI 내부 참고용 상세 줄거리 DB
+      'char_db': p.join(
+        bookDir.path,
+        '${widget.bookId}_char_db.json',
+      ), // AI 내부 참고용 상세 인물 DB
     };
   }
 
@@ -115,11 +128,16 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       final text = await _getVisionText(bytes);
       final lines = text.split('\n').where((l) => l.trim().isNotEmpty).toList();
-      final currentBottom5 = lines.length > 5 ? lines.sublist(lines.length - 5).join("\n") : text;
+      final currentBottom5 = lines.length > 5
+          ? lines.sublist(lines.length - 5).join("\n")
+          : text;
 
       // 동일 페이지 스캔 방지
       if (_referenceText.isNotEmpty) {
-        double similarity = _calculateSimilarity(_referenceText, currentBottom5);
+        double similarity = _calculateSimilarity(
+          _referenceText,
+          currentBottom5,
+        );
         if (similarity >= 0.5) return;
       }
 
@@ -132,9 +150,15 @@ class _ScanScreenState extends State<ScanScreen> {
       _referenceText = currentBottom5;
 
       // 페이지 번호 검출
-      final pageNumber = PageExtractor.extractPageNumberEnhanced(text, context, widget.bookId);
+      final pageNumber = PageExtractor.extractPageNumberEnhanced(
+        text,
+        context,
+        widget.bookId,
+      );
       if (pageNumber != null) {
-        AppStateScope.of(context).updateBookCurrentPage(widget.bookId, pageNumber);
+        AppStateScope.of(
+          context,
+        ).updateBookCurrentPage(widget.bookId, pageNumber);
       }
     } catch (e) {
       debugPrint("OCR 처리 중 오류: $e");
@@ -148,14 +172,20 @@ class _ScanScreenState extends State<ScanScreen> {
   Future<String> _getVisionText(Uint8List bytes) async {
     final base64Image = base64Encode(bytes);
     final response = await http.post(
-      Uri.parse('https://vision.googleapis.com/v1/images:annotate?key=$_googleVisionApiKey'),
+      Uri.parse(
+        'https://vision.googleapis.com/v1/images:annotate?key=$_googleVisionApiKey',
+      ),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
         'requests': [
           {
             'image': {'content': base64Image},
-            'features': [{'type': 'DOCUMENT_TEXT_DETECTION'}],
-            'imageContext': {'languageHints': ['ko']},
+            'features': [
+              {'type': 'DOCUMENT_TEXT_DETECTION'},
+            ],
+            'imageContext': {
+              'languageHints': ['ko'],
+            },
           },
         ],
       }),
@@ -169,14 +199,21 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Future<void> _takePictureAndProcess() async {
-    if (_controller == null || !_controller!.value.isInitialized || _isAnalyzing) return;
+    if (_controller == null ||
+        !_controller!.value.isInitialized ||
+        _isAnalyzing)
+      return;
 
     if (!_isAutoMode) {
       setState(() => _isAutoMode = true);
-      _autoScanTimer = Timer.periodic(const Duration(seconds: 8), (timer) async {
+      _autoScanTimer = Timer.periodic(const Duration(seconds: 8), (
+        timer,
+      ) async {
         if (!_isAnalyzing) await _takePictureAndProcess();
       });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("자동 촬영을 시작합니다.")));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("자동 촬영을 시작합니다.")));
     }
 
     setState(() => _isAnalyzing = true);
@@ -211,29 +248,40 @@ class _ScanScreenState extends State<ScanScreen> {
       if (!await originalFile.exists()) throw Exception("스캔된 새로운 텍스트가 없습니다.");
 
       final String newRawText = await originalFile.readAsString();
-      final String oldStoryDb = await storyDbFile.exists() ? await storyDbFile.readAsString() : "{}";
-      final String oldCharDb = await charDbFile.exists() ? await charDbFile.readAsString() : "{}";
+      final String oldStoryDb = await storyDbFile.exists()
+          ? await storyDbFile.readAsString()
+          : "{}";
+      final String oldCharDb = await charDbFile.exists()
+          ? await charDbFile.readAsString()
+          : "{}";
 
       // 1. Gemini 통합 분석 요청 (4가지 데이터 추출)
-      final responseJson = await _getGeminiIntegratedUpdate(newRawText, oldStoryDb, oldCharDb);
+      final responseJson = await _getGeminiIntegratedUpdate(
+        newRawText,
+        oldStoryDb,
+        oldCharDb,
+      );
       final Map<String, dynamic> result = jsonDecode(responseJson);
 
       // 2. 앱 UI 데이터 업데이트
       final appState = AppStateScope.of(context);
-      
+
       // UI용 요약문
       appState.updateBookSummary(widget.bookId, result['ui_summary'] ?? "");
-      
-      // UI용 캐릭터 목록 (AppState에 updateBookCharacters 메서드가 있다고 가정)
-      /*
+
+      // UI용 캐릭터 목록
       if (result['ui_characters'] != null) {
-        appState.updateBookCharacters(widget.bookId, result['ui_characters']);
+        final rawCharacters = result['ui_characters'];
+        if (rawCharacters is List) {
+          appState.updateBookCharacters(widget.bookId, rawCharacters);
+        }
       }
-      */
 
       // 3. 내부 고밀도 JSON DB 저장 (다음 분석을 위한 데이터 상속)
       await storyDbFile.writeAsString(jsonEncode(result['internal_story_db']));
-      await charDbFile.writeAsString(jsonEncode(result['internal_character_db']));
+      await charDbFile.writeAsString(
+        jsonEncode(result['internal_character_db']),
+      );
 
       // 4. ✅ 원본 텍스트 삭제 (토큰 비용 절감 및 최적화)
       await originalFile.delete();
@@ -241,22 +289,35 @@ class _ScanScreenState extends State<ScanScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("✅ 데이터 통합 업데이트가 완료되었습니다."), backgroundColor: Colors.green),
+          const SnackBar(
+            content: Text("✅ 데이터 통합 업데이트가 완료되었습니다."),
+            backgroundColor: Colors.green,
+          ),
         );
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => BookDetailScreen(bookId: widget.bookId)),
+          MaterialPageRoute(
+            builder: (_) => BookDetailScreen(bookId: widget.bookId),
+          ),
         );
       }
     } catch (e) {
       debugPrint("❌ 업데이트 실패: $e");
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
     } finally {
       if (mounted) setState(() => _isAnalyzing = false);
     }
   }
 
-  Future<String> _getGeminiIntegratedUpdate(String newText, String oldStory, String oldChar) async {
-    final prompt = """
+  Future<String> _getGeminiIntegratedUpdate(
+    String newText,
+    String oldStory,
+    String oldChar,
+  ) async {
+    final prompt =
+        """
 당신은 독서 보조 시스템의 분석 엔진입니다. 
 제공된 기존 데이터와 새로 스캔된 텍스트를 통합하여 반드시 다음 구조의 JSON으로 응답하세요.
 
@@ -279,10 +340,18 @@ $newText
 """;
 
     final response = await http.post(
-      Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_geminiApiKey'),
+      Uri.parse(
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$_geminiApiKey',
+      ),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [
+          {
+            "parts": [
+              {"text": prompt},
+            ],
+          },
+        ],
         "generationConfig": {
           "temperature": 0.7,
           "response_mime_type": "application/json",
@@ -292,9 +361,12 @@ $newText
 
     if (response.statusCode == 200) {
       final decoded = jsonDecode(response.body);
-      return decoded['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? "{}";
+      return decoded['candidates']?[0]?['content']?['parts']?[0]?['text'] ??
+          "{}";
     }
-    throw Exception("Gemini API 호출 실패 (상태 코드: ${response.statusCode})");
+    throw Exception(
+      "Gemini API 호출 실패 (상태 코드: ${response.statusCode}) ${response.body}",
+    );
   }
 
   double _calculateSimilarity(String s1, String s2) {
@@ -327,7 +399,11 @@ $newText
                   Transform.translate(
                     offset: const Offset(0, 30),
                     child: IconButton(
-                      icon: const Icon(Icons.arrow_back_ios, size: 22, color: Colors.black87),
+                      icon: const Icon(
+                        Icons.arrow_back_ios,
+                        size: 22,
+                        color: Colors.black87,
+                      ),
                       onPressed: () => Navigator.of(context).pop(),
                     ),
                   ),
@@ -335,9 +411,21 @@ $newText
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Text(widget.bookTitle, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                        Text(
+                          widget.bookTitle,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                         const SizedBox(width: 12),
-                        Text("현재 인식된 페이지: $currentPage P", style: const TextStyle(fontSize: 13.5, color: Colors.orange)),
+                        Text(
+                          "현재 인식된 페이지: $currentPage P",
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            color: Colors.orange,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -345,9 +433,22 @@ $newText
                     width: 78,
                     child: _pendingOcrCount > 0
                         ? Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(color: Colors.orange[700], borderRadius: BorderRadius.circular(999)),
-                            child: Text("OCR $_pendingOcrCount", style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w600)),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.orange[700],
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              "OCR $_pendingOcrCount",
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           )
                         : const SizedBox(),
                   ),
