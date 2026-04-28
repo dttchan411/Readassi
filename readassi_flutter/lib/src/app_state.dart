@@ -124,23 +124,33 @@ class AppState extends ChangeNotifier {
       for (final character in oldBook.characters) character.name: character,
     };
 
-    final characters = rawCharacters.whereType<Map<String, dynamic>>().map((
-      item,
-    ) {
-      final name = (item['name'] as String? ?? '').trim();
-      final role = (item['role'] as String? ?? '등장인물').trim();
-      final description = (item['description'] as String? ?? '아직 상세 프로필이 없습니다.')
-          .trim();
+    final seenNames = <String>{};
+    final characters = rawCharacters
+        .whereType<Map<String, dynamic>>()
+        .map((item) {
+          final name = _normalizeCharacterField(item['name']);
+          final role = _normalizeCharacterField(item['role']);
+          final description = _normalizeCharacterField(item['description']);
 
-      final existing = existingByName[name];
-      return Character(
-        id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
-        name: name.isEmpty ? '이름 미상' : name,
-        role: role.isEmpty ? '등장인물' : role,
-        description: description.isEmpty ? '아직 상세 프로필이 없습니다.' : description,
-        imageUrl: existing?.imageUrl ?? '',
-      );
-    }).toList();
+          if (!_looksLikeRealCharacter(name, role, description)) {
+            return null;
+          }
+
+          if (!seenNames.add(name)) {
+            return null;
+          }
+
+          final existing = existingByName[name];
+          return Character(
+            id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
+            name: name,
+            role: role.isEmpty ? '등장인물' : role,
+            description: description.isEmpty ? '아직 상세 프로필이 없습니다.' : description,
+            imageUrl: existing?.imageUrl ?? '',
+          );
+        })
+        .whereType<Character>()
+        .toList();
 
     final updatedBook = Book(
       id: oldBook.id,
@@ -302,6 +312,100 @@ class AppState extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_books.map((book) => book.toJson()).toList());
     await prefs.setString(_booksStorageKey, encoded);
+  }
+
+  String _normalizeCharacterField(dynamic value) {
+    return (value as String? ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  bool _looksLikeRealCharacter(
+    String name,
+    String role,
+    String description,
+  ) {
+    if (name.isEmpty) return false;
+    if (name == '이름 미상') return false;
+    if (RegExp(r'^\d+$').hasMatch(name)) return false;
+    if (name.length > 20) return false;
+    if (RegExp(r'[.!?<>[\]{}]').hasMatch(name)) return false;
+
+    const bannedExactNames = {
+      '나',
+      '너',
+      '우리',
+      '그',
+      '그녀',
+      '그들',
+      '이들',
+      '사람',
+      '사람들',
+      '인물',
+      '등장인물',
+      '주인공',
+      '화자',
+      '서술자',
+      '독자',
+      '학생',
+      '학생들',
+      '아이',
+      '아이들',
+      '어른',
+      '어른들',
+      '주민',
+      '주민들',
+      '마을 사람들',
+      '군중',
+      '모두',
+      '누군가',
+      '누구',
+      '친구들',
+      '가족',
+      '부모',
+      '형제들',
+      '자매들',
+    };
+
+    if (bannedExactNames.contains(name)) return false;
+
+    const bannedNameKeywords = {
+      '일행',
+      '무리',
+      '사람들',
+      '학생들',
+      '아이들',
+      '주민들',
+      '형제들',
+      '자매들',
+      '선생님들',
+      '친구들',
+      '직원들',
+      '경찰들',
+      '병사들',
+      '시민들',
+    };
+
+    if (bannedNameKeywords.any(name.contains)) return false;
+
+    const genericRoleKeywords = {
+      '단체',
+      '집단',
+      '배경',
+      '서술',
+      '화자',
+      '군중',
+      '마을 사람',
+      '주민',
+      '학생들',
+      '아이들',
+    };
+
+    final combinedText = '$role $description';
+    if (genericRoleKeywords.any(combinedText.contains) &&
+        name.split(' ').length <= 2) {
+      return false;
+    }
+
+    return true;
   }
 }
 
