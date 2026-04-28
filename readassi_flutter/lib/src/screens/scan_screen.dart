@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -27,16 +28,30 @@ class ScanScreen extends StatefulWidget {
 }
 
 class _ScanScreenState extends State<ScanScreen> {
+  static const Duration _stabilityRequiredDuration = Duration(
+    milliseconds: 1200,
+  );
+  static const Duration _captureCooldownDuration = Duration(seconds: 2);
+  static const Duration _frameProcessingThrottle = Duration(milliseconds: 250);
+  static const double _motionDiffThreshold = 12.0;
+  static const int _lumaSampleCount = 64;
+
   final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
 
-  Timer? _autoScanTimer;
   bool _isAutoMode = false;
-  String _referenceText = "";
+  _OcrTextSnapshot? _lastAcceptedSnapshot;
+  bool _isImageStreamActive = false;
+  bool _awaitingMotionBeforeNextCapture = false;
+  DateTime? _stableSince;
+  DateTime? _lastCaptureAt;
+  DateTime? _lastFrameProcessedAt;
+  List<int>? _lastFrameSignature;
 
   CameraController? _controller;
   bool _isCameraInitialized = false;
-  bool _isAnalyzing = false;
+  bool _isCaptureBusy = false;
+  bool _isProcessingAnalysis = false;
 
   double _minZoomLevel = 1.0;
   double _maxZoomLevel = 1.0;
@@ -59,7 +74,6 @@ class _ScanScreenState extends State<ScanScreen> {
   @override
   void dispose() {
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-    _autoScanTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }
@@ -120,7 +134,7 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // --- OCR 및 촬영 로직 ---
-  Future<void> _enqueueOcr(Uint8List bytes) async {
+  Future<_OcrProcessingResult> _enqueueOcr(Uint8List bytes) async {
     final completer = Completer<void>();
     _ocrQueue.add(completer.future);
     setState(() => _pendingOcrCount = _ocrQueue.length);
@@ -128,17 +142,18 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       final text = await _getVisionText(bytes);
       final lines = text.split('\n').where((l) => l.trim().isNotEmpty).toList();
-      final currentBottom5 = lines.length > 5
-          ? lines.sublist(lines.length - 5).join("\n")
-          : text;
+      final snapshot = _buildSnapshot(text, lines);
+
+      if (!_isUsefulOcrResult(snapshot)) {
+        debugPrint("OCR 결과가 너무 짧거나 불안정해서 저장하지 않습니다.");
+        return _OcrProcessingResult.ignored;
+      }
 
       // 동일 페이지 스캔 방지
-      if (_referenceText.isNotEmpty) {
-        double similarity = _calculateSimilarity(
-          _referenceText,
-          currentBottom5,
-        );
-        if (similarity >= 0.5) return;
+      if (_lastAcceptedSnapshot != null &&
+          _looksLikeDuplicatePage(_lastAcceptedSnapshot!, snapshot)) {
+        debugPrint("동일 페이지로 판단되어 저장하지 않습니다.");
+        return _OcrProcessingResult.duplicate;
       }
 
       // 원본 텍스트 파일에 추가
@@ -147,7 +162,7 @@ class _ScanScreenState extends State<ScanScreen> {
       if (!await file.exists()) await file.create();
       await file.writeAsString('$text\n\n', mode: FileMode.append);
 
-      _referenceText = currentBottom5;
+      _lastAcceptedSnapshot = snapshot;
 
       // 페이지 번호 검출
       final pageNumber = PageExtractor.extractPageNumberEnhanced(
@@ -160,8 +175,10 @@ class _ScanScreenState extends State<ScanScreen> {
           context,
         ).updateBookCurrentPage(widget.bookId, pageNumber);
       }
+      return _OcrProcessingResult.accepted;
     } catch (e) {
       debugPrint("OCR 처리 중 오류: $e");
+      return _OcrProcessingResult.error;
     } finally {
       completer.complete();
       _ocrQueue.removeAt(0);
@@ -198,44 +215,180 @@ class _ScanScreenState extends State<ScanScreen> {
     return "텍스트 추출 실패";
   }
 
-  Future<void> _takePictureAndProcess() async {
+  Future<void> _startAutoCapture() async {
     if (_controller == null ||
         !_controller!.value.isInitialized ||
-        _isAnalyzing)
+        _isAutoMode ||
+        _isCaptureBusy ||
+        _isProcessingAnalysis) {
       return;
-
-    if (!_isAutoMode) {
-      setState(() => _isAutoMode = true);
-      _autoScanTimer = Timer.periodic(const Duration(seconds: 8), (
-        timer,
-      ) async {
-        if (!_isAnalyzing) await _takePictureAndProcess();
-      });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("자동 촬영을 시작합니다.")));
     }
 
-    setState(() => _isAnalyzing = true);
+    setState(() {
+      _isAutoMode = true;
+      _awaitingMotionBeforeNextCapture = false;
+      _stableSince = null;
+      _lastCaptureAt = null;
+      _lastFrameProcessedAt = null;
+      _lastFrameSignature = null;
+    });
+
+    await _ensureImageStreamRunning();
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text("자동 촬영을 시작합니다.")));
+  }
+
+  Future<void> _captureSinglePage() async {
+    if (_controller == null ||
+        !_controller!.value.isInitialized ||
+        _isCaptureBusy ||
+        _isProcessingAnalysis)
+      return;
+
+    setState(() => _isCaptureBusy = true);
     try {
+      final wasStreaming = _isImageStreamActive;
+      if (wasStreaming) {
+        await _stopImageStream();
+      }
+
       final photo = await _controller!.takePicture();
       final bytes = await File(photo.path).readAsBytes();
-      _enqueueOcr(bytes);
+      await _enqueueOcr(bytes);
+
+      if (mounted && _isAutoMode) {
+        _lastCaptureAt = DateTime.now();
+        _awaitingMotionBeforeNextCapture = true;
+        _stableSince = null;
+      }
+
+      if (wasStreaming && _isAutoMode) {
+        await _ensureImageStreamRunning();
+      }
     } catch (e) {
       debugPrint("촬영 오류: $e");
     } finally {
-      if (mounted) setState(() => _isAnalyzing = false);
+      if (mounted) setState(() => _isCaptureBusy = false);
     }
   }
 
-  // --- 데이터 통합 업데이트 로직 (핵심) ---
-  Future<void> _performUpdate() async {
-    if (_isAnalyzing) return;
-    if (_isAutoMode) {
-      _autoScanTimer?.cancel();
-      setState(() => _isAutoMode = false);
+  Future<void> _stopAutoCapture() async {
+    if (!_isAutoMode) return;
+
+    await _stopImageStream();
+
+    setState(() {
+      _isAutoMode = false;
+      _awaitingMotionBeforeNextCapture = false;
+      _stableSince = null;
+      _lastCaptureAt = null;
+      _lastFrameProcessedAt = null;
+      _lastFrameSignature = null;
+    });
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text("자동 촬영을 멈췄습니다. 분석을 눌러 결과를 반영하세요.")));
+  }
+
+  Future<void> _ensureImageStreamRunning() async {
+    if (_controller == null || _isImageStreamActive) return;
+    try {
+      await _controller!.startImageStream(_handleCameraImage);
+      _isImageStreamActive = true;
+    } catch (e) {
+      debugPrint("이미지 스트림 시작 오류: $e");
     }
-    setState(() => _isAnalyzing = true);
+  }
+
+  Future<void> _stopImageStream() async {
+    if (_controller == null || !_isImageStreamActive) return;
+    try {
+      await _controller!.stopImageStream();
+    } catch (e) {
+      debugPrint("이미지 스트림 종료 오류: $e");
+    } finally {
+      _isImageStreamActive = false;
+    }
+  }
+
+  Future<void> _handleCameraImage(CameraImage image) async {
+    if (!_isAutoMode || _isCaptureBusy || _isProcessingAnalysis) return;
+
+    final now = DateTime.now();
+    if (_lastFrameProcessedAt != null &&
+        now.difference(_lastFrameProcessedAt!) < _frameProcessingThrottle) {
+      return;
+    }
+    _lastFrameProcessedAt = now;
+
+    final signature = _buildFrameSignature(image);
+    if (signature.isEmpty) return;
+
+    if (_lastFrameSignature == null) {
+      _lastFrameSignature = signature;
+      return;
+    }
+
+    final diff = _calculateFrameDiff(_lastFrameSignature!, signature);
+    _lastFrameSignature = signature;
+
+    if (diff >= _motionDiffThreshold) {
+      _stableSince = null;
+      _awaitingMotionBeforeNextCapture = false;
+      return;
+    }
+
+    if (_awaitingMotionBeforeNextCapture) return;
+
+    _stableSince ??= now;
+
+    final stableDuration = now.difference(_stableSince!);
+    final cooldownFinished =
+        _lastCaptureAt == null ||
+        now.difference(_lastCaptureAt!) >= _captureCooldownDuration;
+
+    if (cooldownFinished && stableDuration >= _stabilityRequiredDuration) {
+      await _captureSinglePage();
+    }
+  }
+
+  List<int> _buildFrameSignature(CameraImage image) {
+    if (image.planes.isEmpty) return const [];
+    final bytes = image.planes.first.bytes;
+    if (bytes.isEmpty) return const [];
+
+    final step = math.max(1, bytes.length ~/ _lumaSampleCount);
+    final signature = <int>[];
+    for (int i = 0; i < bytes.length && signature.length < _lumaSampleCount; i += step) {
+      signature.add(bytes[i]);
+    }
+    return signature;
+  }
+
+  double _calculateFrameDiff(List<int> previous, List<int> current) {
+    final length = math.min(previous.length, current.length);
+    if (length == 0) return 0.0;
+
+    int totalDiff = 0;
+    for (int i = 0; i < length; i++) {
+      totalDiff += (previous[i] - current[i]).abs();
+    }
+    return totalDiff / length;
+  }
+
+  // --- 데이터 통합 업데이트 로직 (핵심) ---
+  Future<void> _performAnalysis() async {
+    if (_isCaptureBusy || _isProcessingAnalysis) return;
+    if (_isAutoMode) {
+      _stopAutoCapture();
+      return;
+    }
+    setState(() => _isProcessingAnalysis = true);
 
     try {
       if (_ocrQueue.isNotEmpty) await Future.wait(_ocrQueue);
@@ -307,7 +460,7 @@ class _ScanScreenState extends State<ScanScreen> {
           context,
         ).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
     } finally {
-      if (mounted) setState(() => _isAnalyzing = false);
+      if (mounted) setState(() => _isProcessingAnalysis = false);
     }
   }
 
@@ -382,6 +535,98 @@ $newText
     final set2 = s2.split(RegExp(r'\s+')).toSet();
     final intersection = set1.intersection(set2);
     return (2.0 * intersection.length) / (set1.length + set2.length);
+  }
+
+  _OcrTextSnapshot _buildSnapshot(String fullText, List<String> lines) {
+    final normalizedLines = lines
+        .map((line) => line.replaceAll(RegExp(r'\s+'), ' ').trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+
+    final top = normalizedLines.take(4).join('\n');
+    final bottom = normalizedLines.length > 4
+        ? normalizedLines.sublist(normalizedLines.length - 4).join('\n')
+        : normalizedLines.join('\n');
+
+    final middleStart = normalizedLines.length < 6
+        ? 0
+        : ((normalizedLines.length / 2).floor() - 2).clamp(
+            0,
+            normalizedLines.length - 1,
+          );
+    final middleEnd = normalizedLines.isEmpty
+        ? 0
+        : (middleStart + 4).clamp(0, normalizedLines.length);
+    final middle = normalizedLines.sublist(middleStart, middleEnd).join('\n');
+
+    final normalizedFullText = fullText.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    return _OcrTextSnapshot(
+      fullText: normalizedFullText,
+      topExcerpt: top,
+      middleExcerpt: middle,
+      bottomExcerpt: bottom,
+      lineCount: normalizedLines.length,
+      textLength: normalizedFullText.length,
+    );
+  }
+
+  bool _isUsefulOcrResult(_OcrTextSnapshot snapshot) {
+    if (snapshot.fullText.isEmpty) return false;
+    if (snapshot.fullText == "인식 실패") return false;
+    if (snapshot.fullText == "텍스트 추출 실패") return false;
+    if (snapshot.lineCount < 3) return false;
+    if (snapshot.textLength < 40) return false;
+    return true;
+  }
+
+  bool _looksLikeDuplicatePage(
+    _OcrTextSnapshot previous,
+    _OcrTextSnapshot current,
+  ) {
+    final bottomSimilarity = _calculateSimilarity(
+      previous.bottomExcerpt,
+      current.bottomExcerpt,
+    );
+    final middleSimilarity = _calculateSimilarity(
+      previous.middleExcerpt,
+      current.middleExcerpt,
+    );
+    final topSimilarity = _calculateSimilarity(
+      previous.topExcerpt,
+      current.topExcerpt,
+    );
+    final fullSimilarity = _calculateSimilarity(
+      previous.fullText,
+      current.fullText,
+    );
+
+    final shorterLength = previous.textLength < current.textLength
+        ? previous.textLength
+        : current.textLength;
+    final longerLength = previous.textLength > current.textLength
+        ? previous.textLength
+        : current.textLength;
+    final lengthRatio = longerLength == 0 ? 0.0 : shorterLength / longerLength;
+
+    final excerptAverage =
+        (bottomSimilarity * 0.45) +
+        (middleSimilarity * 0.35) +
+        (topSimilarity * 0.20);
+
+    if (bottomSimilarity >= 0.88 &&
+        middleSimilarity >= 0.72 &&
+        lengthRatio >= 0.82) {
+      return true;
+    }
+
+    if (excerptAverage >= 0.82 &&
+        fullSimilarity >= 0.72 &&
+        lengthRatio >= 0.85) {
+      return true;
+    }
+
+    return false;
   }
 
   @override
@@ -467,9 +712,11 @@ $newText
                 controller: _controller!,
                 currentZoomLevel: _currentZoomLevel,
                 onZoomChanged: _updateZoom,
-                isAnalyzing: _isAnalyzing,
-                onUpdatePressed: _performUpdate,
-                onCapturePressed: _takePictureAndProcess,
+                isCapturing: _isAutoMode,
+                isProcessing: _isProcessingAnalysis,
+                onAnalyzePressed: _performAnalysis,
+                onCapturePressed: _startAutoCapture,
+                onStopPressed: _stopAutoCapture,
               ),
             ),
           ],
@@ -477,4 +724,29 @@ $newText
       ),
     );
   }
+}
+
+class _OcrTextSnapshot {
+  const _OcrTextSnapshot({
+    required this.fullText,
+    required this.topExcerpt,
+    required this.middleExcerpt,
+    required this.bottomExcerpt,
+    required this.lineCount,
+    required this.textLength,
+  });
+
+  final String fullText;
+  final String topExcerpt;
+  final String middleExcerpt;
+  final String bottomExcerpt;
+  final int lineCount;
+  final int textLength;
+}
+
+enum _OcrProcessingResult {
+  accepted,
+  duplicate,
+  ignored,
+  error,
 }

@@ -5,18 +5,22 @@ class ScanCameraView extends StatelessWidget {
   final CameraController controller;
   final double currentZoomLevel;
   final Function(double) onZoomChanged;
-  final bool isAnalyzing;
-  final VoidCallback onUpdatePressed;
+  final bool isCapturing;
+  final bool isProcessing;
+  final VoidCallback onAnalyzePressed;
   final VoidCallback onCapturePressed;
+  final VoidCallback onStopPressed;
 
   const ScanCameraView({
     super.key,
     required this.controller,
     required this.currentZoomLevel,
     required this.onZoomChanged,
-    required this.isAnalyzing,
-    required this.onUpdatePressed,
+    required this.isCapturing,
+    required this.isProcessing,
+    required this.onAnalyzePressed,
     required this.onCapturePressed,
+    required this.onStopPressed,
   });
 
   @override
@@ -66,7 +70,7 @@ class ScanCameraView extends StatelessWidget {
               SizedBox(
                 width: 78,
                 child: OutlinedButton(
-                  onPressed: isAnalyzing ? null : onUpdatePressed,
+                  onPressed: isCapturing ? onStopPressed : null,
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     side: const BorderSide(color: Color(0xFFB5651D), width: 1.5),
@@ -75,25 +79,41 @@ class ScanCameraView extends StatelessWidget {
                   child: const Text("중지", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
                 ),
               ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: 78,
+                child: OutlinedButton(
+                  onPressed: isCapturing || isProcessing ? null : onAnalyzePressed,
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    side: const BorderSide(color: Color(0xFF855220), width: 1.5),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                  ),
+                  child: const Text("분석", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                ),
+              ),
               const SizedBox(height: 28),
               SizedBox(
                 width: 78,
                 child: ElevatedButton(
-                  onPressed: isAnalyzing ? null : onCapturePressed,
+                  onPressed: isCapturing || isProcessing ? null : onCapturePressed,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFB5651D),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                   ),
-                  child: const Text("촬영 시작", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                  child: Text(
+                    isCapturing ? "촬영 중" : "촬영 시작",
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
                 ),
               ),
             ],
           ),
         ),
 
-        if (isAnalyzing)
+        if (isProcessing)
           Container(
             color: Colors.black54,
             child: const Center(
