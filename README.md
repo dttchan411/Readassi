@@ -1,117 +1,119 @@
 # Readassi
 
-`Readassi`는 책을 읽을 때 내용을 더 쉽게 따라가도록 도와주는 앱 프로토타입입니다.
+Readassi는 **책을 읽는 흐름을 놓치지 않도록 돕는 AI 독서 보조 앱**입니다.
 
-현재 저장소에는 두 가지가 함께 들어 있습니다.
+현재 이 저장소에서 실제 구현의 중심은 `readassi_flutter/` Flutter 프로젝트입니다.  
+사용자는 책을 등록하고, 페이지를 스캔하고, OCR과 AI 분석을 통해 줄거리와 등장인물 정보를 누적해서 볼 수 있습니다.
 
-- 웹 앱: `React + Vite`로 만든 화면 시안
-- 모바일 앱: `Flutter`로 만든 앱 프로젝트
 
-## 이 프로젝트가 하는 일
+## 주요 기능
 
-웹 앱 기준으로 보면, 이런 화면들이 있습니다.
+- 책 바코드 스캔으로 새 책 등록
+- ISBN 기반 도서 정보 조회
+- 읽던 책 선택 후 페이지 연속 스캔
+- Google Vision OCR로 텍스트 추출
+- Gemini 기반 줄거리/인물 정보 통합 분석
+- 책 상세 화면에서 요약, 인물, 관계, 질문 확인
+- Claude 기반 책 내용 질문 응답
 
-- 홈 화면: 읽고 있는 책 목록 보기
-- 스캔 화면: 책 내용을 읽어들이는 흐름 표현
-- 책 상세 화면: 등장인물, 관계, 진행률 같은 정보 보기
-- 책 선택 화면: 새 책 고르기
 
-아직은 서버에 연결된 완성 앱이라기보다, 아이디어를 보여주는 데모에 가깝습니다.
-실제 데이터베이스 대신 코드 안에 들어 있는 예시 데이터(mock data)를 사용합니다.
+## 현재 구조
 
-## 폴더 구조
-
-중요한 폴더만 쉽게 보면 아래와 같습니다.
+이 저장소의 핵심 디렉터리는 아래와 같습니다.
 
 ```text
 Readassi/
-  src/                   웹 앱 소스코드
-    app/
-      components/        공통 UI 부품
-      pages/             실제 화면들
-      routes.tsx         페이지 주소 연결
-      data.tsx           예시 책 데이터와 상태 관리
-  readassi_flutter/      Flutter 앱 프로젝트
-  dist/                  웹 앱 빌드 결과물
+├─ guidelines/
+├─ readassi_flutter/
+├─ ATTRIBUTIONS.md
+├─ README.md
+├─ PROJECT_STRUCTURE.md
+└─ SETUP.md
 ```
 
-## 웹 앱 실행 방법
+실제 앱 코드:
 
-### 1. 준비물
+- [readassi_flutter](C:\WithAgent\Readassi\readassi_flutter)
 
-아래 프로그램이 설치되어 있어야 합니다.
+구조/흐름 문서:
 
-- Node.js
-- npm
+- [PROJECT_STRUCTURE.md](C:\WithAgent\Readassi\PROJECT_STRUCTURE.md)
 
-설치 확인은 터미널에서 아래 명령어로 할 수 있습니다.
+실행/환경설정 문서:
 
-```powershell
-node -v
-npm -v
-```
+- [SETUP.md](C:\WithAgent\Readassi\SETUP.md)
 
-### 2. 실행
 
-프로젝트 폴더로 이동한 뒤 아래 순서대로 실행합니다.
+## 사용자 흐름 요약
 
-```powershell
-cd C:\WithAgent\Readassi
-npm install
-npm run dev
-```
+### 1. 새 책 등록
 
-정상 실행되면 브라우저에서 개발 서버 주소가 나옵니다.
-보통은 `http://localhost:5173` 입니다.
+1. 홈 화면에서 `새로 책 읽기` 선택
+2. 바코드 스캔
+3. ISBN 기반으로 책 정보 조회
+4. 책 등록 완료
 
-### 3. 배포용 빌드
+### 2. 읽던 책 이어서 분석
 
-```powershell
-npm run build
-```
+1. 홈 화면에서 `이어 읽기` 선택
+2. 기존 책 선택
+3. 페이지 촬영 시작
+4. OCR로 텍스트 수집
+5. AI 분석으로 요약/인물 정보 갱신
+6. 책 상세 화면으로 이동
 
-빌드가 성공하면 결과물이 `dist/` 폴더에 만들어집니다.
+### 3. 분석 결과 확인
 
-## Flutter 앱 실행 방법
+책 상세 화면에서 아래 탭을 확인할 수 있습니다.
 
-Flutter 프로젝트는 `readassi_flutter/` 폴더 안에 있습니다.
+- 요약
+- 인물
+- 관계
+- 질문
 
-```powershell
-cd C:\WithAgent\Readassi\readassi_flutter
-flutter pub get
-flutter run
-```
 
-Flutter SDK가 미리 설치되어 있어야 합니다.
+## 현재 구현 기준 핵심 기술
 
-## 초보자용 파일 설명
+- Flutter
+- camera
+- mobile_scanner
+- Google Vision API
+- Google Books API
+- Kakao Book Search API
+- Gemini API
+- Claude API
+- SharedPreferences
 
-코드를 어디부터 봐야 할지 모르겠다면 이 순서로 보면 이해가 쉽습니다.
 
-1. `src/main.tsx`
-   웹 앱이 시작되는 가장 첫 파일입니다.
-2. `src/app/App.tsx`
-   전체 앱에 라우터를 연결합니다.
-3. `src/app/routes.tsx`
-   어떤 주소가 어떤 화면으로 가는지 정합니다.
-4. `src/app/pages/Home.tsx`
-   메인 화면입니다.
-5. `src/app/data.tsx`
-   책 데이터가 어디서 오는지 보여줍니다.
+## 현재 상태
 
-## 현재 확인한 상태
+이 프로젝트는 완성형 서비스라기보다 **핵심 플로우를 실험하고 다듬는 프로토타입 단계**에 가깝습니다.
 
-- 저장소 클론 완료
-- 웹 앱 의존성 설치 완료
-- `npm run build` 성공 확인
+이미 들어가 있는 흐름:
 
-## 다음에 해보면 좋은 작업
+- 책 등록
+- 페이지 스캔
+- OCR 텍스트 누적
+- AI 요약 갱신
+- 인물 정보 표시
 
-- 깨진 한글 텍스트 정리
-- 예시 데이터(mock data)를 실제 API 데이터로 교체
-- 스캔 기능을 진짜 OCR 기능과 연결
-- Flutter 앱과 웹 앱 역할 분리 정리
+아직 더 다듬어야 할 부분:
 
-## 한 줄 요약
+- 문서와 실제 코드 일치
+- 일부 메타데이터 연결
+- 삭제 로직 정리
+- 관계도 일반화
+- 테스트 보강
 
-이 저장소는 "독서를 도와주는 앱"의 초기 데모 프로젝트이고, 지금은 웹 시안과 Flutter 앱 뼈대가 함께 들어 있는 상태입니다.
+
+## 빠른 시작
+
+실행과 환경설정은 아래 문서를 참고하면 됩니다.
+
+- [SETUP.md](C:\WithAgent\Readassi\SETUP.md)
+
+
+## 참고
+
+- 앱 구조와 흐름 설명: [PROJECT_STRUCTURE.md](C:\WithAgent\Readassi\PROJECT_STRUCTURE.md)
+- 저작권 및 출처: [ATTRIBUTIONS.md](C:\WithAgent\Readassi\ATTRIBUTIONS.md)
