@@ -40,7 +40,8 @@ class _ScanScreenState extends State<ScanScreen> {
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
 
   bool _isAutoMode = false;
-  _OcrTextSnapshot? _lastAcceptedSnapshot;
+  _PageCandidate? _pendingPageCandidate;
+  _PageCandidate? _pendingUncertainCandidate;
   bool _isImageStreamActive = false;
   bool _awaitingMotionBeforeNextCapture = false;
   DateTime? _stableSince;
@@ -134,7 +135,7 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // --- OCR 및 촬영 로직 ---
-  Future<_OcrProcessingResult> _enqueueOcr(Uint8List bytes) async {
+  Future<void> _enqueueOcr(Uint8List bytes) async {
     final completer = Completer<void>();
     _ocrQueue.add(completer.future);
     setState(() => _pendingOcrCount = _ocrQueue.length);
@@ -146,39 +147,80 @@ class _ScanScreenState extends State<ScanScreen> {
 
       if (!_isUsefulOcrResult(snapshot)) {
         debugPrint("OCR 결과가 너무 짧거나 불안정해서 저장하지 않습니다.");
-        return _OcrProcessingResult.ignored;
+        return;
       }
 
-      // 동일 페이지 스캔 방지
-      if (_lastAcceptedSnapshot != null &&
-          _looksLikeDuplicatePage(_lastAcceptedSnapshot!, snapshot)) {
-        debugPrint("동일 페이지로 판단되어 저장하지 않습니다.");
-        return _OcrProcessingResult.duplicate;
-      }
-
-      // 원본 텍스트 파일에 추가
-      final paths = await _getFilePaths();
-      final file = File(paths['original']!);
-      if (!await file.exists()) await file.create();
-      await file.writeAsString('$text\n\n', mode: FileMode.append);
-
-      _lastAcceptedSnapshot = snapshot;
-
-      // 페이지 번호 검출
       final pageNumber = PageExtractor.extractPageNumberEnhanced(
         text,
         context,
         widget.bookId,
       );
-      if (pageNumber != null) {
-        AppStateScope.of(
-          context,
-        ).updateBookCurrentPage(widget.bookId, pageNumber);
+      final currentCandidate = _PageCandidate(
+        text: text,
+        snapshot: snapshot,
+        pageNumber: pageNumber,
+        qualityScore: _calculateOcrQuality(snapshot, pageNumber),
+      );
+
+      if (_pendingPageCandidate == null) {
+        _pendingPageCandidate = currentCandidate;
+        _pendingUncertainCandidate = null;
+        _applyCandidatePageNumber(currentCandidate);
+        debugPrint("새 페이지 후보를 생성했습니다.");
+        return;
       }
-      return _OcrProcessingResult.accepted;
+
+      final previousCandidate = _pendingPageCandidate!;
+
+      if (_looksLikeDuplicatePage(
+        previousCandidate.snapshot,
+        currentCandidate.snapshot,
+      )) {
+        _pendingUncertainCandidate = null;
+        if (_shouldReplaceCandidate(previousCandidate, currentCandidate)) {
+          _pendingPageCandidate = currentCandidate;
+          _applyCandidatePageNumber(currentCandidate);
+          debugPrint("같은 페이지의 더 좋은 OCR 결과로 후보를 교체했습니다.");
+        } else {
+          debugPrint("같은 페이지로 판단되어 기존 후보를 유지합니다.");
+        }
+        return;
+      }
+
+      final uncertainCandidate = _pendingUncertainCandidate;
+      if (uncertainCandidate != null &&
+          _looksLikeDuplicatePage(
+            uncertainCandidate.snapshot,
+            currentCandidate.snapshot,
+          )) {
+        final promotedCandidate = _betterCandidate(
+          uncertainCandidate,
+          currentCandidate,
+        );
+        await _flushPendingCandidateToFile();
+        _pendingPageCandidate = promotedCandidate;
+        _pendingUncertainCandidate = null;
+        _applyCandidatePageNumber(promotedCandidate);
+        debugPrint("보류 중이던 후보가 다음 프레임으로 확인되어 새 페이지로 승격되었습니다.");
+        return;
+      }
+
+      if (_looksUncertainComparedToCandidate(
+        previousCandidate,
+        currentCandidate,
+      )) {
+        _rememberUncertainCandidate(currentCandidate);
+        debugPrint("손 가림 또는 저품질 프레임으로 의심되어 저장을 보류합니다.");
+        return;
+      }
+
+      await _flushPendingCandidateToFile();
+      _pendingPageCandidate = currentCandidate;
+      _pendingUncertainCandidate = null;
+      _applyCandidatePageNumber(currentCandidate);
+      debugPrint("이전 페이지 후보를 저장하고 새 후보를 시작했습니다.");
     } catch (e) {
       debugPrint("OCR 처리 중 오류: $e");
-      return _OcrProcessingResult.error;
     } finally {
       completer.complete();
       _ocrQueue.removeAt(0);
@@ -392,6 +434,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
     try {
       if (_ocrQueue.isNotEmpty) await Future.wait(_ocrQueue);
+      await _flushPendingCandidateToFile();
+      _pendingUncertainCandidate = null;
 
       final paths = await _getFilePaths();
       final originalFile = File(paths['original']!);
@@ -629,6 +673,141 @@ $newText
     return false;
   }
 
+  int _calculateOcrQuality(_OcrTextSnapshot snapshot, int? pageNumber) {
+    final compactText = snapshot.fullText.replaceAll(RegExp(r'\s+'), '');
+    final totalChars = compactText.length;
+    if (totalChars == 0) return 0;
+
+    final hangulCount = RegExp(r'[가-힣]').allMatches(compactText).length;
+    final alphaNumericCount = RegExp(r'[가-힣A-Za-z0-9]').allMatches(
+      compactText,
+    ).length;
+    final noiseCount = totalChars - alphaNumericCount;
+
+    final hangulRatio = hangulCount / totalChars;
+    final noiseRatio = noiseCount / totalChars;
+
+    return snapshot.textLength +
+        (snapshot.lineCount * 18) +
+        (pageNumber != null ? 60 : 0) +
+        (hangulRatio * 100).round() -
+        (noiseRatio * 80).round();
+  }
+
+  bool _shouldReplaceCandidate(
+    _PageCandidate previous,
+    _PageCandidate current,
+  ) {
+    return current.qualityScore > previous.qualityScore + 25;
+  }
+
+  _PageCandidate _betterCandidate(
+    _PageCandidate first,
+    _PageCandidate second,
+  ) {
+    return _shouldReplaceCandidate(first, second) ? second : first;
+  }
+
+  bool _looksUncertainComparedToCandidate(
+    _PageCandidate previous,
+    _PageCandidate current,
+  ) {
+    final topSimilarity = _calculateSimilarity(
+      previous.snapshot.topExcerpt,
+      current.snapshot.topExcerpt,
+    );
+    final middleSimilarity = _calculateSimilarity(
+      previous.snapshot.middleExcerpt,
+      current.snapshot.middleExcerpt,
+    );
+    final bottomSimilarity = _calculateSimilarity(
+      previous.snapshot.bottomExcerpt,
+      current.snapshot.bottomExcerpt,
+    );
+    final fullSimilarity = _calculateSimilarity(
+      previous.snapshot.fullText,
+      current.snapshot.fullText,
+    );
+
+    final shorterLength = math.min(
+      previous.snapshot.textLength,
+      current.snapshot.textLength,
+    );
+    final longerLength = math.max(
+      previous.snapshot.textLength,
+      current.snapshot.textLength,
+    );
+    final lengthRatio = longerLength == 0 ? 0.0 : shorterLength / longerLength;
+
+    final pageNumberMatches =
+        previous.pageNumber != null &&
+        current.pageNumber != null &&
+        previous.pageNumber == current.pageNumber;
+
+    final qualityDrop =
+        current.qualityScore < (previous.qualityScore * 0.72).round();
+    final severeBodyMismatch =
+        topSimilarity >= 0.65 &&
+        middleSimilarity < 0.45 &&
+        bottomSimilarity < 0.45;
+    final shortAndNoisy =
+        current.snapshot.textLength < 140 &&
+        current.snapshot.lineCount < 8 &&
+        lengthRatio < 0.78;
+
+    if (pageNumberMatches && (qualityDrop || severeBodyMismatch)) {
+      return true;
+    }
+
+    if (severeBodyMismatch && (qualityDrop || shortAndNoisy)) {
+      return true;
+    }
+
+    if (fullSimilarity < 0.55 && qualityDrop && shortAndNoisy) {
+      return true;
+    }
+
+    return false;
+  }
+
+  void _applyCandidatePageNumber(_PageCandidate candidate) {
+    if (candidate.pageNumber == null) return;
+    AppStateScope.of(
+      context,
+    ).updateBookCurrentPage(widget.bookId, candidate.pageNumber);
+  }
+
+  void _rememberUncertainCandidate(_PageCandidate candidate) {
+    final existing = _pendingUncertainCandidate;
+    if (existing == null) {
+      _pendingUncertainCandidate = candidate;
+      return;
+    }
+
+    if (_looksLikeDuplicatePage(existing.snapshot, candidate.snapshot)) {
+      _pendingUncertainCandidate = _betterCandidate(existing, candidate);
+      return;
+    }
+
+    if (candidate.qualityScore > existing.qualityScore) {
+      _pendingUncertainCandidate = candidate;
+    }
+  }
+
+  Future<void> _flushPendingCandidateToFile() async {
+    final candidate = _pendingPageCandidate;
+    if (candidate == null) return;
+
+    final paths = await _getFilePaths();
+    final file = File(paths['original']!);
+    if (!await file.exists()) {
+      await file.create();
+    }
+    await file.writeAsString('${candidate.text}\n\n', mode: FileMode.append);
+    _pendingPageCandidate = null;
+    _pendingUncertainCandidate = null;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_isCameraInitialized || _controller == null) {
@@ -744,9 +923,16 @@ class _OcrTextSnapshot {
   final int textLength;
 }
 
-enum _OcrProcessingResult {
-  accepted,
-  duplicate,
-  ignored,
-  error,
+class _PageCandidate {
+  const _PageCandidate({
+    required this.text,
+    required this.snapshot,
+    required this.pageNumber,
+    required this.qualityScore,
+  });
+
+  final String text;
+  final _OcrTextSnapshot snapshot;
+  final int? pageNumber;
+  final int qualityScore;
 }
