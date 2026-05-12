@@ -120,37 +120,38 @@ class AppState extends ChangeNotifier {
     if (index == -1) return;
 
     final oldBook = _books[index];
-    final existingByName = {
+    final charactersByName = {
       for (final character in oldBook.characters) character.name: character,
     };
 
     final seenNames = <String>{};
-    final characters = rawCharacters
-        .whereType<Map<String, dynamic>>()
-        .map((item) {
-          final name = _normalizeCharacterField(item['name']);
-          final role = _normalizeCharacterField(item['role']);
-          final description = _normalizeCharacterField(item['description']);
+    for (final item in rawCharacters.whereType<Map<String, dynamic>>()) {
+      final name = _normalizeCharacterField(item['name']);
+      final role = _normalizeCharacterField(item['role']);
+      final description = _normalizeCharacterField(item['description']);
 
-          if (!_looksLikeRealCharacter(name, role, description)) {
-            return null;
-          }
+      if (!_looksLikeRealCharacter(name, role, description)) {
+        continue;
+      }
 
-          if (!seenNames.add(name)) {
-            return null;
-          }
+      if (!seenNames.add(name)) {
+        continue;
+      }
 
-          final existing = existingByName[name];
-          return Character(
-            id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
-            name: name,
-            role: role.isEmpty ? '등장인물' : role,
-            description: description.isEmpty ? '아직 상세 프로필이 없습니다.' : description,
-            imageUrl: existing?.imageUrl ?? '',
-          );
-        })
-        .whereType<Character>()
-        .toList();
+      final existing = charactersByName[name];
+      charactersByName[name] = Character(
+        id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
+        name: name,
+        role: _selectCharacterRole(existing?.role, role),
+        description: _selectCharacterDescription(
+          existing?.description,
+          description,
+        ),
+        imageUrl: existing?.imageUrl ?? '',
+      );
+    }
+
+    final characters = charactersByName.values.toList();
 
     final updatedBook = Book(
       id: oldBook.id,
@@ -160,6 +161,103 @@ class AppState extends ChangeNotifier {
       summary: oldBook.summary,
       characters: characters,
       relationships: oldBook.relationships,
+      keywords: oldBook.keywords,
+      currentPage: oldBook.currentPage,
+      totalPages: oldBook.totalPages,
+      progress: oldBook.progress,
+      isbn: oldBook.isbn,
+      publisher: oldBook.publisher,
+      publishedDate: oldBook.publishedDate,
+      description: oldBook.description,
+    );
+
+    _books[index] = updatedBook;
+    _saveBooks();
+    notifyListeners();
+  }
+
+  void updateBookRelationships(String bookId, List<dynamic> rawRelationships) {
+    final index = _books.indexWhere((book) => book.id == bookId);
+    if (index == -1) return;
+
+    final oldBook = _books[index];
+    if (oldBook.characters.length < 2) return;
+
+    final relationshipsByKey = <String, Relationship>{};
+    for (final relationship in oldBook.relationships) {
+      final key = _relationshipKey(
+        relationship.source,
+        relationship.target,
+        oldBook.characters,
+      );
+      if (key != null) {
+        relationshipsByKey[key] = relationship;
+      }
+    }
+
+    final seenKeys = <String>{};
+    for (final item in rawRelationships.whereType<Map<String, dynamic>>()) {
+      final source = _normalizeCharacterField(item['source'] ?? item['from']);
+      final target = _normalizeCharacterField(item['target'] ?? item['to']);
+      final label = _normalizeCharacterField(item['label']);
+      final description = _normalizeCharacterField(item['description']);
+      final evidence = _normalizeCharacterField(item['evidence']);
+      final type = _normalizeCharacterField(item['type']);
+      final strength = _normalizeRelationshipStrength(item['strength']);
+
+      if (source.isEmpty || target.isEmpty || label.isEmpty) {
+        continue;
+      }
+
+      final sourceCharacter = _resolveCharacterReference(
+        source,
+        oldBook.characters,
+      );
+      final targetCharacter = _resolveCharacterReference(
+        target,
+        oldBook.characters,
+      );
+
+      if (sourceCharacter == null || targetCharacter == null) {
+        continue;
+      }
+
+      if (sourceCharacter.id == targetCharacter.id) {
+        continue;
+      }
+
+      final key = _relationshipKey(
+        sourceCharacter.name,
+        targetCharacter.name,
+        oldBook.characters,
+      );
+      if (key == null || !seenKeys.add(key)) {
+        continue;
+      }
+
+      final existing = relationshipsByKey[key];
+      relationshipsByKey[key] = Relationship(
+        source: sourceCharacter.name,
+        target: targetCharacter.name,
+        label: _selectRelationshipText(existing?.label, label),
+        description: _selectRelationshipText(
+          existing?.description,
+          description,
+        ),
+        evidence: _selectRelationshipText(existing?.evidence, evidence),
+        strength: _selectRelationshipStrength(existing?.strength, strength),
+        type: type.isEmpty ? existing?.type ?? '' : type,
+      );
+    }
+
+    final updatedBook = Book(
+      id: oldBook.id,
+      title: oldBook.title,
+      author: oldBook.author,
+      coverUrl: oldBook.coverUrl,
+      summary: oldBook.summary,
+      characters: oldBook.characters,
+      relationships: relationshipsByKey.values.toList(),
       keywords: oldBook.keywords,
       currentPage: oldBook.currentPage,
       totalPages: oldBook.totalPages,
@@ -318,11 +416,159 @@ class AppState extends ChangeNotifier {
     return (value as String? ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
-  bool _looksLikeRealCharacter(
-    String name,
-    String role,
-    String description,
+  String _selectCharacterRole(String? existingRole, String incomingRole) {
+    final existing = _normalizeCharacterField(existingRole);
+    final incoming = _normalizeCharacterField(incomingRole);
+
+    if (_isGenericCharacterRole(incoming)) {
+      return existing.isEmpty ? '등장인물' : existing;
+    }
+
+    return incoming;
+  }
+
+  String _selectCharacterDescription(
+    String? existingDescription,
+    String incomingDescription,
   ) {
+    final existing = _normalizeCharacterField(existingDescription);
+    final incoming = _normalizeCharacterField(incomingDescription);
+
+    if (_isEmptyCharacterDescription(incoming)) {
+      return _isEmptyCharacterDescription(existing)
+          ? '아직 상세 프로필이 없습니다.'
+          : existing;
+    }
+
+    if (_isEmptyCharacterDescription(existing)) {
+      return incoming;
+    }
+
+    final existingScore = _characterDescriptionScore(existing);
+    final incomingScore = _characterDescriptionScore(incoming);
+    return incomingScore >= existingScore + 12 ? incoming : existing;
+  }
+
+  bool _isGenericCharacterRole(String role) {
+    const genericRoles = {'', '인물', '등장인물', '주요 인물', '주변 인물'};
+    return genericRoles.contains(role);
+  }
+
+  bool _isEmptyCharacterDescription(String description) {
+    return description.isEmpty || description == '아직 상세 프로필이 없습니다.';
+  }
+
+  int _characterDescriptionScore(String description) {
+    final meaningfulWords = description
+        .split(RegExp(r'\s+'))
+        .where((word) => word.length > 1)
+        .toSet()
+        .length;
+    const detailKeywords = {
+      '관계',
+      '갈등',
+      '변화',
+      '목표',
+      '비밀',
+      '현재',
+      '상황',
+      '태도',
+      '성격',
+      '때문',
+      '하지만',
+    };
+    final detailScore = detailKeywords
+        .where((keyword) => description.contains(keyword))
+        .length;
+
+    return description.length + meaningfulWords * 2 + detailScore * 10;
+  }
+
+  Character? _resolveCharacterReference(
+    String value,
+    List<Character> characters,
+  ) {
+    final normalized = _normalizeCharacterField(value);
+    if (normalized.isEmpty) return null;
+
+    for (final character in characters) {
+      if (character.id == normalized || character.name == normalized) {
+        return character;
+      }
+    }
+
+    return null;
+  }
+
+  String? _relationshipKey(
+    String source,
+    String target,
+    List<Character> characters,
+  ) {
+    final sourceCharacter = _resolveCharacterReference(source, characters);
+    final targetCharacter = _resolveCharacterReference(target, characters);
+    if (sourceCharacter == null || targetCharacter == null) return null;
+    if (sourceCharacter.id == targetCharacter.id) return null;
+
+    final ids = [sourceCharacter.id, targetCharacter.id]..sort();
+    return '${ids[0]}__${ids[1]}';
+  }
+
+  String _selectRelationshipText(String? existingText, String incomingText) {
+    final existing = _normalizeCharacterField(existingText);
+    final incoming = _normalizeCharacterField(incomingText);
+
+    if (incoming.isEmpty) return existing;
+    if (existing.isEmpty) return incoming;
+
+    return _relationshipTextScore(incoming) >=
+            _relationshipTextScore(existing) + 8
+        ? incoming
+        : existing;
+  }
+
+  int _relationshipTextScore(String text) {
+    final meaningfulWords = text
+        .split(RegExp(r'\s+'))
+        .where((word) => word.length > 1)
+        .toSet()
+        .length;
+    const detailKeywords = {
+      '관계',
+      '신뢰',
+      '갈등',
+      '의심',
+      '협력',
+      '대립',
+      '가족',
+      '친구',
+      '동료',
+      '비밀',
+      '변화',
+    };
+    final detailScore = detailKeywords
+        .where((word) => text.contains(word))
+        .length;
+    return text.length + meaningfulWords * 2 + detailScore * 8;
+  }
+
+  int _normalizeRelationshipStrength(dynamic value) {
+    final strength = switch (value) {
+      int number => number,
+      double number => number.round(),
+      String text => int.tryParse(text) ?? 1,
+      _ => 1,
+    };
+    return strength.clamp(1, 5);
+  }
+
+  int _selectRelationshipStrength(int? existingStrength, int incomingStrength) {
+    return incomingStrength > (existingStrength ?? 1)
+        ? incomingStrength
+        : existingStrength ?? 1;
+  }
+
+  bool _looksLikeRealCharacter(String name, String role, String description) {
     if (name.isEmpty) return false;
     if (name == '이름 미상') return false;
     if (RegExp(r'^\d+$').hasMatch(name)) return false;

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../app_state.dart';
@@ -284,52 +286,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               .toList(),
         );
       case BookDetailTab.map:
-        if (book.characters.length < 3 || book.relationships.length < 3) {
+        if (book.characters.length < 2 || book.relationships.isEmpty) {
           return const _NoticeCard(message: '관계 지도를 그리기에는 인물 정보가 아직 부족합니다.');
         }
-        return Card(
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: SizedBox(
-              height: 320,
-              child: Stack(
-                children: [
-                  const Positioned.fill(
-                    child: CustomPaint(painter: _RelationshipLinesPainter()),
-                  ),
-                  _Node(
-                    alignment: const Alignment(0, -0.85),
-                    name: book.characters[0].name,
-                    imageUrl: book.characters[0].imageUrl,
-                  ),
-                  _Node(
-                    alignment: const Alignment(-0.8, 0.78),
-                    name: book.characters[1].name,
-                    imageUrl: book.characters[1].imageUrl,
-                  ),
-                  _Node(
-                    alignment: const Alignment(0.8, 0.78),
-                    name: book.characters[2].name,
-                    imageUrl: book.characters[2].imageUrl,
-                  ),
-                  _EdgeLabel(
-                    alignment: const Alignment(-0.42, -0.02),
-                    text: book.relationships[0].label,
-                  ),
-                  _EdgeLabel(
-                    alignment: const Alignment(0.42, -0.02),
-                    text: book.relationships[1].label,
-                  ),
-                  _EdgeLabel(
-                    alignment: const Alignment(0, 0.67),
-                    text: book.relationships[2].label,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
+        return _RelationshipMapView(book: book);
       case BookDetailTab.chat:
         return Card(
           margin: EdgeInsets.zero,
@@ -459,100 +419,505 @@ class _NoticeCard extends StatelessWidget {
   }
 }
 
-class _Node extends StatelessWidget {
-  const _Node({
-    required this.alignment,
-    required this.name,
-    required this.imageUrl,
+class _RelationshipMapView extends StatelessWidget {
+  const _RelationshipMapView({required this.book});
+
+  static const _maxVisibleRelationships = 12;
+  static const _maxVisibleCharacters = 8;
+
+  final Book book;
+
+  @override
+  Widget build(BuildContext context) {
+    final graph = _RelationshipGraphData.fromBook(
+      book,
+      maxRelationships: _maxVisibleRelationships,
+      maxCharacters: _maxVisibleCharacters,
+    );
+
+    if (graph.relationships.isEmpty) {
+      return const _NoticeCard(message: '표시할 수 있는 인물 관계가 아직 없습니다.');
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                final height = width < 420 ? 430.0 : 470.0;
+                final positions = graph.buildPositions(Size(width, height));
+
+                return SizedBox(
+                  height: height,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: CustomPaint(
+                          painter: _RelationshipGraphPainter(
+                            relationships: graph.relationships,
+                            positions: positions,
+                          ),
+                        ),
+                      ),
+                      for (final character in graph.characters)
+                        _GraphNode(
+                          character: character,
+                          position: positions[character.id]!,
+                          isHub: character.id == graph.hub.id,
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => CharacterProfileScreen(
+                                  book: book,
+                                  character: character,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          '주요 관계',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 10),
+        ...graph.relationships.map(
+          (relationship) => Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: _RelationshipSummaryTile(edge: relationship),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RelationshipGraphData {
+  const _RelationshipGraphData({
+    required this.characters,
+    required this.relationships,
+    required this.hub,
   });
 
-  final Alignment alignment;
-  final String name;
-  final String imageUrl;
+  final List<Character> characters;
+  final List<_ResolvedRelationship> relationships;
+  final Character hub;
+
+  factory _RelationshipGraphData.fromBook(
+    Book book, {
+    required int maxRelationships,
+    required int maxCharacters,
+  }) {
+    final resolved =
+        book.relationships
+            .map(
+              (relationship) =>
+                  _ResolvedRelationship.tryCreate(book, relationship),
+            )
+            .whereType<_ResolvedRelationship>()
+            .toList()
+          ..sort(
+            (a, b) =>
+                b.relationship.strength.compareTo(a.relationship.strength),
+          );
+
+    final degree = <String, int>{};
+    for (final edge in resolved) {
+      degree[edge.source.id] =
+          (degree[edge.source.id] ?? 0) + edge.relationship.strength;
+      degree[edge.target.id] =
+          (degree[edge.target.id] ?? 0) + edge.relationship.strength;
+    }
+
+    final rankedCharacters =
+        book.characters
+            .where((character) => degree.containsKey(character.id))
+            .toList()
+          ..sort((a, b) => (degree[b.id] ?? 0).compareTo(degree[a.id] ?? 0));
+
+    final visibleCharacters = rankedCharacters.take(maxCharacters).toList();
+    final visibleIds = visibleCharacters
+        .map((character) => character.id)
+        .toSet();
+    final visibleRelationships = resolved
+        .where(
+          (edge) =>
+              visibleIds.contains(edge.source.id) &&
+              visibleIds.contains(edge.target.id),
+        )
+        .take(maxRelationships)
+        .toList();
+
+    final hub = visibleCharacters.isEmpty
+        ? book.characters.first
+        : visibleCharacters.first;
+    return _RelationshipGraphData(
+      characters: visibleCharacters.isEmpty ? [hub] : visibleCharacters,
+      relationships: visibleRelationships,
+      hub: hub,
+    );
+  }
+
+  Map<String, Offset> buildPositions(Size size) {
+    final positions = <String, Offset>{};
+    final center = Offset(size.width / 2, size.height * 0.46);
+    positions[hub.id] = center;
+
+    final outerCharacters = characters
+        .where((character) => character.id != hub.id)
+        .toList();
+    if (outerCharacters.isEmpty) return positions;
+
+    final horizontalRadius = math.max(96.0, size.width * 0.36).toDouble();
+    final verticalRadius = size.height * 0.32;
+    final startAngle = -math.pi / 2;
+
+    for (var index = 0; index < outerCharacters.length; index++) {
+      final angle = startAngle + (math.pi * 2 * index / outerCharacters.length);
+      final x = center.dx + math.cos(angle) * horizontalRadius;
+      final y = center.dy + math.sin(angle) * verticalRadius;
+      positions[outerCharacters[index].id] = Offset(
+        x.clamp(58.0, size.width - 58.0).toDouble(),
+        y.clamp(62.0, size.height - 58.0).toDouble(),
+      );
+    }
+
+    return positions;
+  }
+}
+
+class _ResolvedRelationship {
+  const _ResolvedRelationship({
+    required this.relationship,
+    required this.source,
+    required this.target,
+  });
+
+  final Relationship relationship;
+  final Character source;
+  final Character target;
+
+  static _ResolvedRelationship? tryCreate(
+    Book book,
+    Relationship relationship,
+  ) {
+    final source = _findCharacter(book, relationship.source);
+    final target = _findCharacter(book, relationship.target);
+    if (source == null || target == null || source.id == target.id) {
+      return null;
+    }
+
+    return _ResolvedRelationship(
+      relationship: relationship,
+      source: source,
+      target: target,
+    );
+  }
+
+  static Character? _findCharacter(Book book, String value) {
+    for (final character in book.characters) {
+      if (character.id == value || character.name == value) {
+        return character;
+      }
+    }
+    return null;
+  }
+}
+
+class _GraphNode extends StatelessWidget {
+  const _GraphNode({
+    required this.character,
+    required this.position,
+    required this.isHub,
+    required this.onTap,
+  });
+
+  final Character character;
+  final Offset position;
+  final bool isHub;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: alignment,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          BookCover(
-            imageUrl: imageUrl,
-            width: 72,
-            height: 72,
-            borderRadius: 36,
-          ),
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFFE4DDD6)),
+    final size = isHub ? 112.0 : 92.0;
+    final avatarSize = isHub ? 68.0 : 56.0;
+
+    return Positioned(
+      left: position.dx - size / 2,
+      top: position.dy - size / 2,
+      width: size,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: isHub ? const Color(0xFF9C5B22) : const Color(0xFFE6DED5),
+              width: isHub ? 1.6 : 1,
             ),
-            child: Text(
-              name,
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.07),
+                blurRadius: 14,
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-        ],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              BookCover(
+                imageUrl: character.imageUrl,
+                width: avatarSize,
+                height: avatarSize,
+                borderRadius: avatarSize / 2,
+              ),
+              const SizedBox(height: 7),
+              Text(
+                character.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: isHub ? 13 : 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                character.role,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 10, color: Color(0xFF7D746C)),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
 
-class _EdgeLabel extends StatelessWidget {
-  const _EdgeLabel({required this.alignment, required this.text});
+class _RelationshipGraphPainter extends CustomPainter {
+  const _RelationshipGraphPainter({
+    required this.relationships,
+    required this.positions,
+  });
 
-  final Alignment alignment;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: alignment,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF7EC),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFF1DEC0)),
-        ),
-        child: Text(
-          text,
-          style: const TextStyle(
-            color: Color(0xFF9C5B22),
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _RelationshipLinesPainter extends CustomPainter {
-  const _RelationshipLinesPainter();
+  final List<_ResolvedRelationship> relationships;
+  final Map<String, Offset> positions;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = const Color(0xFFD8D0C7)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
+    for (final edge in relationships) {
+      final source = positions[edge.source.id];
+      final target = positions[edge.target.id];
+      if (source == null || target == null) continue;
 
-    final top = Offset(size.width / 2, 62);
-    final left = Offset(82, size.height - 80);
-    final right = Offset(size.width - 82, size.height - 80);
+      final color = _relationshipColor(edge.relationship.type);
+      final paint = Paint()
+        ..color = color.withValues(alpha: 0.56)
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = 1.4 + edge.relationship.strength.clamp(1, 5) * 0.45;
 
-    canvas.drawLine(top, left, paint);
-    canvas.drawLine(top, right, paint);
-    canvas.drawLine(left, right, paint);
+      canvas.drawLine(source, target, paint);
+      _drawEdgeLabel(canvas, source, target, edge.relationship.label, color);
+    }
+  }
+
+  void _drawEdgeLabel(
+    Canvas canvas,
+    Offset source,
+    Offset target,
+    String label,
+    Color color,
+  ) {
+    if (label.isEmpty) return;
+
+    final midpoint = Offset(
+      (source.dx + target.dx) / 2,
+      (source.dy + target.dy) / 2,
+    );
+    final painter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      maxLines: 1,
+      ellipsis: '...',
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: 86);
+
+    final rect = Rect.fromCenter(
+      center: midpoint,
+      width: painter.width + 18,
+      height: painter.height + 8,
+    );
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(12));
+    canvas.drawRRect(rrect, Paint()..color = const Color(0xFFFFFCF7));
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..color = color.withValues(alpha: 0.28)
+        ..style = PaintingStyle.stroke,
+    );
+    painter.paint(
+      canvas,
+      Offset(rect.left + 9, rect.top + (rect.height - painter.height) / 2),
+    );
+  }
+
+  Color _relationshipColor(String type) {
+    return switch (type) {
+      'ally' => const Color(0xFF397367),
+      'family' => const Color(0xFF8A5A9E),
+      'conflict' => const Color(0xFFB4493D),
+      'romance' => const Color(0xFFC05A7A),
+      'mentor' => const Color(0xFF8B6F2F),
+      'mystery' => const Color(0xFF4D6899),
+      _ => const Color(0xFF8E7866),
+    };
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _RelationshipGraphPainter oldDelegate) {
+    return oldDelegate.relationships != relationships ||
+        oldDelegate.positions != positions;
+  }
+}
+
+class _RelationshipSummaryTile extends StatelessWidget {
+  const _RelationshipSummaryTile({required this.edge});
+
+  final _ResolvedRelationship edge;
+
+  @override
+  Widget build(BuildContext context) {
+    final relationship = edge.relationship;
+    final description = relationship.description.isEmpty
+        ? '아직 자세한 관계 설명이 없습니다.'
+        : relationship.description;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${edge.source.name} · ${edge.target.name}',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                _StrengthPills(strength: relationship.strength),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Chip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text(relationship.label),
+                ),
+                if (relationship.type.isNotEmpty)
+                  Chip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(_relationshipTypeLabel(relationship.type)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              description,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                height: 1.55,
+                color: const Color(0xFF6F675F),
+              ),
+            ),
+            if (relationship.evidence.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                '근거: ${relationship.evidence}',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  height: 1.45,
+                  color: const Color(0xFF8B8178),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _relationshipTypeLabel(String type) {
+    return switch (type) {
+      'ally' => '협력',
+      'family' => '가족',
+      'conflict' => '대립',
+      'romance' => '감정',
+      'mentor' => '사제',
+      'mystery' => '미스터리',
+      _ => '관계',
+    };
+  }
+}
+
+class _StrengthPills extends StatelessWidget {
+  const _StrengthPills({required this.strength});
+
+  final int strength;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(5, (index) {
+        final active = index < strength.clamp(1, 5);
+        return Container(
+          width: 6,
+          height: 16,
+          margin: EdgeInsets.only(left: index == 0 ? 0 : 3),
+          decoration: BoxDecoration(
+            color: active ? const Color(0xFF9C5B22) : const Color(0xFFE7DED4),
+            borderRadius: BorderRadius.circular(999),
+          ),
+        );
+      }),
+    );
+  }
 }
 
 class _ChatMessage {
@@ -560,32 +925,4 @@ class _ChatMessage {
 
   final ChatRole role;
   final String content;
-}
-
-class _MetaInfo extends StatelessWidget {
-  const _MetaInfo({required this.label, required this.value, super.key});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          '$label: ',
-          style: Theme.of(
-            context,
-          ).textTheme.bodySmall?.copyWith(color: const Color(0xFF7D746C)),
-        ),
-        Text(
-          value,
-          style: Theme.of(
-            context,
-          ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-        ),
-      ],
-    );
-  }
 }

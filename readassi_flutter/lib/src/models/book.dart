@@ -39,21 +39,41 @@ class Relationship {
     required this.source,
     required this.target,
     required this.label,
+    this.description = '',
+    this.evidence = '',
+    this.strength = 1,
+    this.type = '',
   });
 
   final String source;
   final String target;
   final String label;
+  final String description;
+  final String evidence;
+  final int strength;
+  final String type;
 
   Map<String, dynamic> toJson() {
-    return {'source': source, 'target': target, 'label': label};
+    return {
+      'source': source,
+      'target': target,
+      'label': label,
+      'description': description,
+      'evidence': evidence,
+      'strength': strength,
+      'type': type,
+    };
   }
 
   factory Relationship.fromJson(Map<String, dynamic> json) {
     return Relationship(
-      source: json['source'] as String,
-      target: json['target'] as String,
-      label: json['label'] as String,
+      source: json['source'] as String? ?? '',
+      target: json['target'] as String? ?? '',
+      label: json['label'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      evidence: json['evidence'] as String? ?? '',
+      strength: json['strength'] is int ? json['strength'] as int : 1,
+      type: json['type'] as String? ?? '',
     );
   }
 }
@@ -71,10 +91,10 @@ class Book {
     this.currentPage,
     this.totalPages,
     this.progress,
-    this.isbn,           // ← 새로 추가
-    this.publisher,      // ← 새로 추가
-    this.publishedDate,  // ← 새로 추가
-    this.description,    // ← 새로 추가 (Google/Kakao에서 가져온 원문 설명)
+    this.isbn, // ← 새로 추가
+    this.publisher, // ← 새로 추가
+    this.publishedDate, // ← 새로 추가
+    this.description, // ← 새로 추가 (Google/Kakao에서 가져온 원문 설명)
   });
 
   final String id;
@@ -110,10 +130,10 @@ class Book {
       'currentPage': currentPage,
       'totalPages': totalPages,
       'progress': progress,
-      'isbn': isbn,                    // ← 추가
-      'publisher': publisher,          // ← 추가
-      'publishedDate': publishedDate,  // ← 추가
-      'description': description,      // ← 추가
+      'isbn': isbn, // ← 추가
+      'publisher': publisher, // ← 추가
+      'publishedDate': publishedDate, // ← 추가
+      'description': description, // ← 추가
     };
   }
 
@@ -128,12 +148,16 @@ class Book {
           .map((keyword) => keyword as String)
           .toList(),
       characters: (json['characters'] as List<dynamic>? ?? const [])
-          .map((character) =>
-              Character.fromJson(character as Map<String, dynamic>))
+          .map(
+            (character) =>
+                Character.fromJson(character as Map<String, dynamic>),
+          )
           .toList(),
       relationships: (json['relationships'] as List<dynamic>? ?? const [])
-          .map((relationship) =>
-              Relationship.fromJson(relationship as Map<String, dynamic>))
+          .map(
+            (relationship) =>
+                Relationship.fromJson(relationship as Map<String, dynamic>),
+          )
           .toList(),
       currentPage: json['currentPage'] as int?,
       totalPages: json['totalPages'] as int?,

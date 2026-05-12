@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
-import 'dart:typed_data';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
@@ -150,6 +149,7 @@ class _ScanScreenState extends State<ScanScreen> {
         return;
       }
 
+      if (!mounted) return;
       final pageNumber = PageExtractor.extractPageNumberEnhanced(
         text,
         context,
@@ -287,8 +287,9 @@ class _ScanScreenState extends State<ScanScreen> {
     if (_controller == null ||
         !_controller!.value.isInitialized ||
         _isCaptureBusy ||
-        _isProcessingAnalysis)
+        _isProcessingAnalysis) {
       return;
+    }
 
     setState(() => _isCaptureBusy = true);
     try {
@@ -332,9 +333,9 @@ class _ScanScreenState extends State<ScanScreen> {
     });
 
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text("자동 촬영을 멈췄습니다. 분석을 눌러 결과를 반영하세요.")));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("자동 촬영을 멈췄습니다. 분석을 눌러 결과를 반영하세요.")),
+    );
   }
 
   Future<void> _ensureImageStreamRunning() async {
@@ -406,7 +407,11 @@ class _ScanScreenState extends State<ScanScreen> {
 
     final step = math.max(1, bytes.length ~/ _lumaSampleCount);
     final signature = <int>[];
-    for (int i = 0; i < bytes.length && signature.length < _lumaSampleCount; i += step) {
+    for (
+      int i = 0;
+      i < bytes.length && signature.length < _lumaSampleCount;
+      i += step
+    ) {
       signature.add(bytes[i]);
     }
     return signature;
@@ -431,6 +436,7 @@ class _ScanScreenState extends State<ScanScreen> {
       return;
     }
     setState(() => _isProcessingAnalysis = true);
+    final appState = AppStateScope.of(context);
 
     try {
       if (_ocrQueue.isNotEmpty) await Future.wait(_ocrQueue);
@@ -461,8 +467,6 @@ class _ScanScreenState extends State<ScanScreen> {
       final Map<String, dynamic> result = jsonDecode(responseJson);
 
       // 2. 앱 UI 데이터 업데이트
-      final appState = AppStateScope.of(context);
-
       // UI용 요약문
       appState.updateBookSummary(widget.bookId, result['ui_summary'] ?? "");
 
@@ -471,6 +475,14 @@ class _ScanScreenState extends State<ScanScreen> {
         final rawCharacters = result['ui_characters'];
         if (rawCharacters is List) {
           appState.updateBookCharacters(widget.bookId, rawCharacters);
+        }
+      }
+
+      // UI용 인물 관계
+      if (result['ui_relationships'] != null) {
+        final rawRelationships = result['ui_relationships'];
+        if (rawRelationships is List) {
+          appState.updateBookRelationships(widget.bookId, rawRelationships);
         }
       }
 
@@ -499,10 +511,11 @@ class _ScanScreenState extends State<ScanScreen> {
       }
     } catch (e) {
       debugPrint("❌ 업데이트 실패: $e");
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
+      }
     } finally {
       if (mounted) setState(() => _isProcessingAnalysis = false);
     }
@@ -531,14 +544,27 @@ $newText
 1. internal_story_db: AI인 당신이 다음에 분석할 때 참고할 매우 상세한 줄거리 데이터입니다. 주요 복선, 시간순 사건을 JSON으로 구성하세요.
 2. internal_character_db: 인물 간의 관계, 성격 변화, 현재 위치 등을 정밀하게 추적하는 JSON 데이터입니다.
 3. ui_summary: 사용자가 앱 화면에서 바로 읽을 수 있도록 자연스러운 10줄 내외의 줄거리 요약입니다. (평문)
-4. ui_characters: 앱의 인물 탭에 리스트로 보여줄 데이터입니다. 형식: [{"name": "이름", "role": "역할", "description": "설명"}]
-5. ui_characters에는 실제 등장인물만 넣으세요. 다음은 넣지 마세요:
+4. ui_characters: 앱의 인물 탭에 리스트로 보여줄 누적 인물 요약 데이터입니다. 형식: [{"name": "이름", "role": "역할", "description": "설명"}]
+   - description은 사용자가 인물 탭에서 바로 이해할 수 있는 한국어 2~3문장으로 작성하세요.
+   - 각 인물의 역할, 현재 상황, 성격/태도 변화, 다른 인물과의 관계를 스캔된 텍스트 근거 안에서만 요약하세요.
+   - 기존 인물 데이터가 있으면 새 텍스트와 합쳐 누적 업데이트하세요. 새 텍스트에 나오지 않았다는 이유만으로 기존 사실을 지우지 마세요.
+   - 확실하지 않은 추측, 앞으로의 전개 예측, 텍스트에 없는 배경 설정은 쓰지 마세요.
+   - 잠깐 언급된 인물은 억지로 길게 쓰지 말고 확인된 사실만 짧게 쓰세요.
+5. ui_relationships: 앱의 관계 탭에 표시할 인물 관계 데이터입니다. 형식: [{"source": "인물 이름", "target": "인물 이름", "label": "짧은 관계명", "description": "관계 설명", "evidence": "근거", "strength": 1, "type": "관계 유형"}]
+   - source와 target은 반드시 ui_characters에 포함된 실제 인물 이름을 그대로 쓰세요.
+   - label은 "친구", "가족", "협력", "대립", "스승과 제자"처럼 화면에 올릴 짧은 표현으로 쓰세요.
+   - description은 두 인물 사이의 현재 관계를 1~2문장으로 설명하세요.
+   - evidence는 스캔 텍스트에서 확인되는 근거를 짧게 요약하세요. 직접 인용이 불확실하면 요약으로 쓰세요.
+   - strength는 관계가 얼마나 뚜렷한지 1~5 정수로 쓰세요. 잠깐 언급된 약한 관계는 1, 반복되고 서사적으로 중요한 관계는 5입니다.
+   - type은 ally, family, conflict, romance, mentor, mystery, neutral 중 가장 가까운 값을 쓰세요.
+   - 관계가 확실하지 않거나 한쪽 인물이 불명확하면 넣지 마세요.
+6. ui_characters에는 실제 등장인물만 넣으세요. 다음은 넣지 마세요:
    - 군중, 주민들, 학생들, 사람들 같은 집단 표현
    - 화자, 서술자, 주인공, 누군가, 친구 같은 일반 명사
    - 직책이나 관계만 있고 고유하게 식별되지 않는 표현
    - 장소, 단체, 개념, 사물
-6. 이름이 분명하지 않으면 억지로 넣지 말고 제외하세요.
-7. 한 번만 스쳐 지나가는 일반 호칭보다, 이야기에서 실제 인물로 추적 가능한 대상만 남기세요.
+7. 이름이 분명하지 않으면 억지로 넣지 말고 제외하세요.
+8. 한 번만 스쳐 지나가는 일반 호칭보다, 이야기에서 실제 인물로 추적 가능한 대상만 남기세요.
 
 응답은 반드시 마크다운 기호 없이 순수한 JSON 객체 하나만 출력하세요.
 """;
@@ -679,9 +705,9 @@ $newText
     if (totalChars == 0) return 0;
 
     final hangulCount = RegExp(r'[가-힣]').allMatches(compactText).length;
-    final alphaNumericCount = RegExp(r'[가-힣A-Za-z0-9]').allMatches(
-      compactText,
-    ).length;
+    final alphaNumericCount = RegExp(
+      r'[가-힣A-Za-z0-9]',
+    ).allMatches(compactText).length;
     final noiseCount = totalChars - alphaNumericCount;
 
     final hangulRatio = hangulCount / totalChars;
@@ -701,10 +727,7 @@ $newText
     return current.qualityScore > previous.qualityScore + 25;
   }
 
-  _PageCandidate _betterCandidate(
-    _PageCandidate first,
-    _PageCandidate second,
-  ) {
+  _PageCandidate _betterCandidate(_PageCandidate first, _PageCandidate second) {
     return _shouldReplaceCandidate(first, second) ? second : first;
   }
 

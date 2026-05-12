@@ -73,39 +73,64 @@ class ScanCameraView extends StatelessWidget {
                   onPressed: isCapturing ? onStopPressed : null,
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    side: const BorderSide(color: Color(0xFFB5651D), width: 1.5),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    side: const BorderSide(
+                      color: Color(0xFFB5651D),
+                      width: 1.5,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
                   ),
-                  child: const Text("중지", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                  child: const Text(
+                    "중지",
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
                 ),
               ),
               const SizedBox(height: 14),
               SizedBox(
                 width: 78,
                 child: OutlinedButton(
-                  onPressed: isCapturing || isProcessing ? null : onAnalyzePressed,
+                  onPressed: isCapturing || isProcessing
+                      ? null
+                      : onAnalyzePressed,
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    side: const BorderSide(color: Color(0xFF855220), width: 1.5),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    side: const BorderSide(
+                      color: Color(0xFF855220),
+                      width: 1.5,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
                   ),
-                  child: const Text("분석", style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                  child: const Text(
+                    "분석",
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
                 ),
               ),
               const SizedBox(height: 28),
               SizedBox(
                 width: 78,
                 child: ElevatedButton(
-                  onPressed: isCapturing || isProcessing ? null : onCapturePressed,
+                  onPressed: isCapturing || isProcessing
+                      ? null
+                      : onCapturePressed,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFB5651D),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
                   ),
                   child: Text(
                     isCapturing ? "촬영 중" : "촬영 시작",
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),
@@ -122,7 +147,10 @@ class ScanCameraView extends StatelessWidget {
                 children: [
                   CircularProgressIndicator(color: Colors.white),
                   SizedBox(height: 20),
-                  Text("AI 분석 중...", style: TextStyle(color: Colors.white, fontSize: 18)),
+                  Text(
+                    "AI 분석 중...",
+                    style: TextStyle(color: Colors.white, fontSize: 18),
+                  ),
                 ],
               ),
             ),
@@ -139,10 +167,21 @@ class ScanCameraView extends StatelessWidget {
         width: 58,
         height: 58,
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFB5651D) : Colors.white.withOpacity(0.85),
+          color: isSelected
+              ? const Color(0xFFB5651D)
+              : Colors.white.withValues(alpha: 0.85),
           shape: BoxShape.circle,
-          border: Border.all(color: isSelected ? Colors.white : Colors.black38, width: 2),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 6, offset: const Offset(0, 3))],
+          border: Border.all(
+            color: isSelected ? Colors.white : Colors.black38,
+            width: 2,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.2),
+              blurRadius: 6,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
         child: Center(
           child: Text(

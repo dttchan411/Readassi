@@ -110,9 +110,10 @@ class CharacterProfileScreen extends StatelessWidget {
               child: Column(
                 children: book.relationships
                     .where(
-                      (relationship) =>
-                          relationship.source == character.id ||
-                          relationship.target == character.id,
+                      (relationship) => _relationshipIncludesCharacter(
+                        relationship,
+                        character,
+                      ),
                     )
                     .map(
                       (relationship) => Padding(
@@ -129,7 +130,7 @@ class CharacterProfileScreen extends StatelessWidget {
                               borderRadius: BorderRadius.circular(16),
                             ),
                             child: Text(
-                              relationship.label,
+                              _relationshipHintText(relationship, character),
                               style: Theme.of(context).textTheme.bodyMedium
                                   ?.copyWith(fontWeight: FontWeight.w600),
                             ),
@@ -144,6 +145,38 @@ class CharacterProfileScreen extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  bool _relationshipIncludesCharacter(
+    Relationship relationship,
+    Character character,
+  ) {
+    return relationship.source == character.id ||
+        relationship.source == character.name ||
+        relationship.target == character.id ||
+        relationship.target == character.name;
+  }
+
+  String _relationshipHintText(Relationship relationship, Character character) {
+    final otherReference =
+        relationship.source == character.id ||
+            relationship.source == character.name
+        ? relationship.target
+        : relationship.source;
+    final other = _characterNameFromReference(otherReference);
+    final description = relationship.description.isEmpty
+        ? relationship.label
+        : relationship.description;
+    return '$other · $description';
+  }
+
+  String _characterNameFromReference(String reference) {
+    for (final candidate in book.characters) {
+      if (candidate.id == reference || candidate.name == reference) {
+        return candidate.name;
+      }
+    }
+    return reference;
   }
 }
 

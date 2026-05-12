@@ -17,7 +17,9 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
   bool _isProcessed = false;
 
   final String _kakaoApiKey = dotenv.env['_kakaoApiKey'] ?? '';
-  final String _googleBooksApiKey = dotenv.env['_googleBooksApiKey'] ?? ''; // ← 기존에 googleVisionApiKey로 잘못 썼던 부분 수정
+  final String _googleBooksApiKey =
+      dotenv.env['_googleBooksApiKey'] ??
+      ''; // ← 기존에 googleVisionApiKey로 잘못 썼던 부분 수정
 
   @override
   Widget build(BuildContext context) {
@@ -56,7 +58,7 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
 
       if (info != null) {
         // ✅ 새로 만든 메서드 사용 (title, author, cover, totalPages 한 번에 등록)
-        final newBookId = appState.addBookWithFullInfo(
+        appState.addBookWithFullInfo(
           title: info['title'] ?? '제목 없음',
           author: info['author'] ?? '작자 미상',
           coverUrl: info['coverUrl'] ?? '',
@@ -85,9 +87,9 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
       if (mounted) {
         Navigator.pop(context); // 로딩 다이얼로그 닫기
         Navigator.pop(context); // 스캔 화면 닫기
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('책 등록 실패: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('책 등록 실패: $e')));
       }
     }
   }
@@ -105,7 +107,9 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
   Future<Map<String, dynamic>?> _searchKakao(String isbn) async {
     try {
       final response = await http.get(
-        Uri.parse('https://dapi.kakao.com/v3/search/book.json?query=$isbn&target=isbn'),
+        Uri.parse(
+          'https://dapi.kakao.com/v3/search/book.json?query=$isbn&target=isbn',
+        ),
         headers: {'Authorization': 'KakaoAK $_kakaoApiKey'},
       );
 
@@ -134,7 +138,9 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
   Future<Map<String, dynamic>?> _searchGoogle(String isbn) async {
     try {
       final response = await http.get(
-        Uri.parse('https://www.googleapis.com/books/v1/volumes?q=isbn:$isbn&key=$_googleBooksApiKey'),
+        Uri.parse(
+          'https://www.googleapis.com/books/v1/volumes?q=isbn:$isbn&key=$_googleBooksApiKey',
+        ),
       );
 
       if (response.statusCode == 200) {
@@ -145,12 +151,13 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
         final volumeInfo = items.first['volumeInfo'] as Map<String, dynamic>;
         return {
           'title': volumeInfo['title'] ?? '',
-          'author': (volumeInfo['authors'] as List<dynamic>?)?.join(', ') ?? '작자 미상',
+          'author':
+              (volumeInfo['authors'] as List<dynamic>?)?.join(', ') ?? '작자 미상',
           'coverUrl': volumeInfo['imageLinks']?['thumbnail'] ?? '',
           'isbn': isbn,
           'publisher': volumeInfo['publisher'] ?? '',
           'publishedDate': volumeInfo['publishedDate'],
-          'description': volumeInfo['description'] ?? '',   // ← 이게 제일 중요
+          'description': volumeInfo['description'] ?? '', // ← 이게 제일 중요
         };
       }
     } catch (e) {

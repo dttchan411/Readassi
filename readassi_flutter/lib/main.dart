@@ -8,9 +8,9 @@ Future<void> main() async {
 
   try {
     await dotenv.load(fileName: ".env");
-    print("성공: .env 파일을 불러왔습니다.");
+    debugPrint("성공: .env 파일을 불러왔습니다.");
   } catch (e) {
-    print("실패: .env 파일을 찾을 수 없습니다. 경로를 확인하세요: $e");
+    debugPrint("실패: .env 파일을 찾을 수 없습니다. 경로를 확인하세요: $e");
   }
 
   runApp(const ReadAssiApp());

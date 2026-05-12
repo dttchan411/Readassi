@@ -7,7 +7,10 @@ class PageExtractor {
     BuildContext context,
     String bookId,
   ) {
-    final lines = fullText.split('\n').where((l) => l.trim().isNotEmpty).toList();
+    final lines = fullText
+        .split('\n')
+        .where((l) => l.trim().isNotEmpty)
+        .toList();
     if (lines.isEmpty) return null;
 
     final regExp = RegExp(r'\b(\d{1,3})\b');
@@ -16,14 +19,27 @@ class PageExtractor {
 
     // 1. 로직 고정 상태 확인
     if (_lockedLocation == 'bottom') {
-      return _findValidNum(lines.length > 5 ? lines.sublist(lines.length - 5) : lines, lastPage);
+      return _findValidNum(
+        lines.length > 5 ? lines.sublist(lines.length - 5) : lines,
+        lastPage,
+      );
     } else if (_lockedLocation == 'top') {
-      return _findValidNum(lines.length > 5 ? lines.sublist(0, 5) : lines, lastPage, isTop: true);
+      return _findValidNum(
+        lines.length > 5 ? lines.sublist(0, 5) : lines,
+        lastPage,
+        isTop: true,
+      );
     }
 
     // 2~5단계: 상/하단 숫자 및 해당 라인 정보 추출
-    final bottomData = _getMaxNumAndLine(lines.length > 5 ? lines.sublist(lines.length - 5) : lines, regExp);
-    final topData = _getMaxNumAndLine(lines.length > 5 ? lines.sublist(0, 5) : lines, regExp);
+    final bottomData = _getMaxNumAndLine(
+      lines.length > 5 ? lines.sublist(lines.length - 5) : lines,
+      regExp,
+    );
+    final topData = _getMaxNumAndLine(
+      lines.length > 5 ? lines.sublist(0, 5) : lines,
+      regExp,
+    );
 
     int? bottomNum = bottomData?['num'];
     int? topNum = topData?['num'];
@@ -50,7 +66,8 @@ class PageExtractor {
         candidateLine = bottomData!['line'];
       } else {
         int processedTop = topNum + 1;
-        if (lastPage == null || (bottomNum - lastPage).abs() <= (processedTop - lastPage).abs()) {
+        if (lastPage == null ||
+            (bottomNum - lastPage).abs() <= (processedTop - lastPage).abs()) {
           candidateNum = bottomNum;
           candidateLine = bottomData!['line'];
         } else {
@@ -106,7 +123,10 @@ class PageExtractor {
   }
 
   // 헬퍼 함수들 (static)
-  static Map<String, dynamic>? _getMaxNumAndLine(List<String> targetLines, RegExp reg) {
+  static Map<String, dynamic>? _getMaxNumAndLine(
+    List<String> targetLines,
+    RegExp reg,
+  ) {
     int? max;
     String? maxLine;
     for (var line in targetLines) {
@@ -122,19 +142,11 @@ class PageExtractor {
     return (max != null) ? {'num': max, 'line': maxLine} : null;
   }
 
-  static int? _getMaxNumFromLines(List<String> targetLines, RegExp reg) {
-    int? max;
-    for (var line in targetLines) {
-      final matches = reg.allMatches(line);
-      for (var m in matches) {
-        int n = int.parse(m.group(1)!);
-        if (max == null || n > max) max = n;
-      }
-    }
-    return max;
-  }
-
-  static int? _findValidNum(List<String> targetLines, int? lastPage, {bool isTop = false}) {
+  static int? _findValidNum(
+    List<String> targetLines,
+    int? lastPage, {
+    bool isTop = false,
+  }) {
     final regExp = RegExp(r'\b(\d{1,3})\b');
     int? bestNum;
 
@@ -148,8 +160,10 @@ class PageExtractor {
         if (cleanLine.length <= m.group(1)!.length + 2) {
           int processedNum = isTop ? num + 1 : num;
 
-          if (lastPage == null || lastPage == 0 ||
-              (processedNum <= lastPage + 10 && processedNum >= lastPage - 10)) {
+          if (lastPage == null ||
+              lastPage == 0 ||
+              (processedNum <= lastPage + 10 &&
+                  processedNum >= lastPage - 10)) {
             if (bestNum == null || processedNum > bestNum) {
               bestNum = processedNum;
             }
