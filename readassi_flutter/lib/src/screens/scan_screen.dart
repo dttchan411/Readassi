@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import '../app_state.dart';
+import '../services/claude_service.dart';
 import 'book_detail_screen.dart';
 import 'scan_camera_view.dart';
 import 'page_extractor.dart';
@@ -37,6 +38,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
   final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
+  final ClaudeService _claudeService = ClaudeService();
 
   bool _isAutoMode = false;
   _PageCandidate? _pendingPageCandidate;
@@ -483,6 +485,31 @@ class _ScanScreenState extends State<ScanScreen> {
         final rawRelationships = result['ui_relationships'];
         if (rawRelationships is List) {
           appState.updateBookRelationships(widget.bookId, rawRelationships);
+        }
+      }
+
+      final bookAfterGemini = appState.findBookById(widget.bookId);
+      if (bookAfterGemini != null && _claudeService.isConfigured) {
+        final claudeResult = await _claudeService
+            .analyzeCharactersAndRelationships(
+              book: bookAfterGemini,
+              newText: newRawText,
+              existingCharacterDb: oldCharDb,
+            );
+
+        if (claudeResult != null) {
+          if (claudeResult.characters.isNotEmpty) {
+            appState.updateBookCharacters(
+              widget.bookId,
+              claudeResult.charactersAsJson(),
+            );
+          }
+          if (claudeResult.relationships.isNotEmpty) {
+            appState.updateBookRelationships(
+              widget.bookId,
+              claudeResult.relationshipsAsJson(),
+            );
+          }
         }
       }
 

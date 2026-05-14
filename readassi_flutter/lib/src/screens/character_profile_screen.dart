@@ -27,8 +27,6 @@ class CharacterProfileScreen extends StatelessWidget {
           Center(
             child: Column(
               children: [
-                _CharacterAvatar(character: character),
-                const SizedBox(height: 16),
                 Text(
                   character.name,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
@@ -204,41 +202,6 @@ class _ProfileCard extends StatelessWidget {
             const SizedBox(height: 14),
             child,
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _CharacterAvatar extends StatelessWidget {
-  const _CharacterAvatar({required this.character});
-
-  final Character character;
-
-  @override
-  Widget build(BuildContext context) {
-    if (character.imageUrl.isNotEmpty) {
-      return BookCover(
-        imageUrl: character.imageUrl,
-        width: 108,
-        height: 108,
-        borderRadius: 54,
-      );
-    }
-
-    return Container(
-      width: 108,
-      height: 108,
-      decoration: const BoxDecoration(
-        color: Color(0xFFFFF1DE),
-        shape: BoxShape.circle,
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        character.name.isEmpty ? '?' : character.name.substring(0, 1),
-        style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-          color: const Color(0xFF9C5B22),
-          fontWeight: FontWeight.w700,
         ),
       ),
     );

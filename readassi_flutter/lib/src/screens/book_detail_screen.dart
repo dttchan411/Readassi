@@ -219,62 +219,49 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       },
                       child: Padding(
                         padding: const EdgeInsets.all(16),
-                        child: Row(
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            BookCover(
-                              imageUrl: character.imageUrl,
-                              width: 64,
-                              height: 64,
-                              borderRadius: 18,
-                            ),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: Text(
                                     character.name,
                                     style: Theme.of(context)
                                         .textTheme
                                         .titleMedium
                                         ?.copyWith(fontWeight: FontWeight.w700),
                                   ),
-                                  const SizedBox(height: 6),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFF3EFE8),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(character.role),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    character.description,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .bodyMedium
-                                        ?.copyWith(
-                                          height: 1.5,
-                                          color: const Color(0xFF6F675F),
-                                        ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  const Text(
-                                    '프로필 보기',
-                                    style: TextStyle(
-                                      color: Color(0xFF9C5B22),
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ],
+                                ),
+                                const Icon(
+                                  Icons.chevron_right_rounded,
+                                  color: Color(0xFF9C5B22),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
                               ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF3EFE8),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(character.role),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              character.description,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(
+                                    height: 1.5,
+                                    color: const Color(0xFF6F675F),
+                                  ),
                             ),
                           ],
                         ),
@@ -419,7 +406,7 @@ class _NoticeCard extends StatelessWidget {
   }
 }
 
-class _RelationshipMapView extends StatelessWidget {
+class _RelationshipMapView extends StatefulWidget {
   const _RelationshipMapView({required this.book});
 
   static const _maxVisibleRelationships = 12;
@@ -428,16 +415,39 @@ class _RelationshipMapView extends StatelessWidget {
   final Book book;
 
   @override
+  State<_RelationshipMapView> createState() => _RelationshipMapViewState();
+}
+
+class _RelationshipMapViewState extends State<_RelationshipMapView> {
+  String? _selectedCharacterId;
+
+  @override
   Widget build(BuildContext context) {
     final graph = _RelationshipGraphData.fromBook(
-      book,
-      maxRelationships: _maxVisibleRelationships,
-      maxCharacters: _maxVisibleCharacters,
+      widget.book,
+      maxRelationships: _RelationshipMapView._maxVisibleRelationships,
+      maxCharacters: _RelationshipMapView._maxVisibleCharacters,
     );
 
     if (graph.relationships.isEmpty) {
       return const _NoticeCard(message: '표시할 수 있는 인물 관계가 아직 없습니다.');
     }
+
+    final selectedRelationships = _selectedCharacterId == null
+        ? graph.relationships
+        : graph.relationships
+              .where(
+                (edge) =>
+                    edge.source.id == _selectedCharacterId ||
+                    edge.target.id == _selectedCharacterId,
+              )
+              .toList();
+    final shownRelationships = selectedRelationships.isEmpty
+        ? graph.relationships
+        : selectedRelationships;
+    final selectedCharacter = _selectedCharacterId == null
+        ? null
+        : graph.characterById[_selectedCharacterId!];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -445,65 +455,214 @@ class _RelationshipMapView extends StatelessWidget {
         Card(
           margin: EdgeInsets.zero,
           child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final width = constraints.maxWidth;
-                final height = width < 420 ? 430.0 : 470.0;
-                final positions = graph.buildPositions(Size(width, height));
-
-                return SizedBox(
-                  height: height,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: CustomPaint(
-                          painter: _RelationshipGraphPainter(
-                            relationships: graph.relationships,
-                            positions: positions,
-                          ),
-                        ),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        selectedCharacter == null
+                            ? '전체 관계 지도'
+                            : '${selectedCharacter.name} 중심 관계',
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w800),
                       ),
-                      for (final character in graph.characters)
-                        _GraphNode(
-                          character: character,
-                          position: positions[character.id]!,
-                          isHub: character.id == graph.hub.id,
-                          onTap: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => CharacterProfileScreen(
-                                  book: book,
-                                  character: character,
-                                ),
+                    ),
+                    if (_selectedCharacterId != null)
+                      TextButton.icon(
+                        onPressed: () {
+                          setState(() => _selectedCharacterId = null);
+                        },
+                        icon: const Icon(Icons.clear_rounded, size: 18),
+                        label: const Text('전체'),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const _RelationshipLegend(),
+                const SizedBox(height: 12),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width = constraints.maxWidth;
+                    final height = width < 420 ? 430.0 : 470.0;
+                    final positions = graph.buildPositions(Size(width, height));
+
+                    return SizedBox(
+                      height: height,
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: CustomPaint(
+                              painter: _RelationshipGraphPainter(
+                                relationships: graph.relationships,
+                                positions: positions,
+                                selectedCharacterId: _selectedCharacterId,
                               ),
-                            );
-                          },
-                        ),
-                    ],
-                  ),
-                );
-              },
+                            ),
+                          ),
+                          for (final character in graph.characters)
+                            _GraphNode(
+                              character: character,
+                              position: positions[character.id]!,
+                              isHub: character.id == graph.hub.id,
+                              isSelected: character.id == _selectedCharacterId,
+                              isDimmed:
+                                  _selectedCharacterId != null &&
+                                  !_isCharacterConnectedToSelection(
+                                    character.id,
+                                    graph.relationships,
+                                  ),
+                              onTap: () {
+                                setState(() {
+                                  _selectedCharacterId =
+                                      _selectedCharacterId == character.id
+                                      ? null
+                                      : character.id;
+                                });
+                              },
+                              onOpenProfile: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => CharacterProfileScreen(
+                                      book: widget.book,
+                                      character: character,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
           ),
         ),
         const SizedBox(height: 16),
-        Text(
-          '주요 관계',
-          style: Theme.of(
-            context,
-          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                selectedCharacter == null
+                    ? '주요 관계'
+                    : '${selectedCharacter.name}의 관계',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+            Text(
+              '${shownRelationships.length}개',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: const Color(0xFF7D746C)),
+            ),
+          ],
         ),
         const SizedBox(height: 10),
-        ...graph.relationships.map(
+        ...shownRelationships.map(
           (relationship) => Padding(
             padding: const EdgeInsets.only(bottom: 10),
-            child: _RelationshipSummaryTile(edge: relationship),
+            child: _RelationshipSummaryTile(
+              edge: relationship,
+              isHighlighted: _selectedCharacterId == null
+                  ? false
+                  : relationship.source.id == _selectedCharacterId ||
+                        relationship.target.id == _selectedCharacterId,
+            ),
           ),
         ),
       ],
     );
   }
+
+  bool _isCharacterConnectedToSelection(
+    String characterId,
+    List<_ResolvedRelationship> relationships,
+  ) {
+    if (_selectedCharacterId == null || characterId == _selectedCharacterId) {
+      return true;
+    }
+
+    return relationships.any(
+      (edge) =>
+          (edge.source.id == _selectedCharacterId &&
+              edge.target.id == characterId) ||
+          (edge.target.id == _selectedCharacterId &&
+              edge.source.id == characterId),
+    );
+  }
+}
+
+class _RelationshipLegend extends StatelessWidget {
+  const _RelationshipLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    const items = [
+      ('협력', 'ally'),
+      ('가족', 'family'),
+      ('대립', 'conflict'),
+      ('사제', 'mentor'),
+      ('미스터리', 'mystery'),
+    ];
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: items
+          .map(
+            (item) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+              decoration: BoxDecoration(
+                color: _relationshipColor(item.$2).withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: _relationshipColor(item.$2).withValues(alpha: 0.32),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: _relationshipColor(item.$2),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    item.$1,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+}
+
+Color _relationshipColor(String type) {
+  return switch (type) {
+    'ally' => const Color(0xFF397367),
+    'family' => const Color(0xFF8A5A9E),
+    'conflict' => const Color(0xFFB4493D),
+    'romance' => const Color(0xFFC05A7A),
+    'mentor' => const Color(0xFF8B6F2F),
+    'mystery' => const Color(0xFF4D6899),
+    _ => const Color(0xFF8E7866),
+  };
 }
 
 class _RelationshipGraphData {
@@ -516,6 +675,10 @@ class _RelationshipGraphData {
   final List<Character> characters;
   final List<_ResolvedRelationship> relationships;
   final Character hub;
+
+  Map<String, Character> get characterById => {
+    for (final character in characters) character.id: character,
+  };
 
   factory _RelationshipGraphData.fromBook(
     Book book, {
@@ -643,72 +806,104 @@ class _GraphNode extends StatelessWidget {
     required this.character,
     required this.position,
     required this.isHub,
+    required this.isSelected,
+    required this.isDimmed,
     required this.onTap,
+    required this.onOpenProfile,
   });
 
   final Character character;
   final Offset position;
   final bool isHub;
+  final bool isSelected;
+  final bool isDimmed;
   final VoidCallback onTap;
+  final VoidCallback onOpenProfile;
 
   @override
   Widget build(BuildContext context) {
     final size = isHub ? 112.0 : 92.0;
     final avatarSize = isHub ? 68.0 : 56.0;
+    final borderColor = isSelected
+        ? const Color(0xFFB5651D)
+        : isHub
+        ? const Color(0xFF9C5B22)
+        : const Color(0xFFE6DED5);
 
     return Positioned(
       left: position.dx - size / 2,
       top: position.dy - size / 2,
       width: size,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(
-              color: isHub ? const Color(0xFF9C5B22) : const Color(0xFFE6DED5),
-              width: isHub ? 1.6 : 1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.07),
-                blurRadius: 14,
-                offset: const Offset(0, 6),
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 180),
+        opacity: isDimmed ? 0.32 : 1,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: onTap,
+          onLongPress: onOpenProfile,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            decoration: BoxDecoration(
+              color: isSelected ? const Color(0xFFFFF7EC) : Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: borderColor,
+                width: isSelected
+                    ? 2.2
+                    : isHub
+                    ? 1.6
+                    : 1,
               ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              BookCover(
-                imageUrl: character.imageUrl,
-                width: avatarSize,
-                height: avatarSize,
-                borderRadius: avatarSize / 2,
-              ),
-              const SizedBox(height: 7),
-              Text(
-                character.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: isHub ? 13 : 12,
-                  fontWeight: FontWeight.w800,
+              boxShadow: [
+                BoxShadow(
+                  color: borderColor.withValues(alpha: isSelected ? 0.22 : 0.1),
+                  blurRadius: isSelected ? 18 : 14,
+                  offset: const Offset(0, 6),
                 ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                character.role,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 10, color: Color(0xFF7D746C)),
-              ),
-            ],
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                BookCover(
+                  imageUrl: character.imageUrl,
+                  width: avatarSize,
+                  height: avatarSize,
+                  borderRadius: avatarSize / 2,
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  character.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: isHub ? 13 : 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  character.role,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF7D746C),
+                  ),
+                ),
+                if (isSelected) ...[
+                  const SizedBox(height: 5),
+                  const Icon(
+                    Icons.hub_rounded,
+                    size: 14,
+                    color: Color(0xFFB5651D),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),
@@ -720,10 +915,12 @@ class _RelationshipGraphPainter extends CustomPainter {
   const _RelationshipGraphPainter({
     required this.relationships,
     required this.positions,
+    required this.selectedCharacterId,
   });
 
   final List<_ResolvedRelationship> relationships;
   final Map<String, Offset> positions;
+  final String? selectedCharacterId;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -733,14 +930,22 @@ class _RelationshipGraphPainter extends CustomPainter {
       if (source == null || target == null) continue;
 
       final color = _relationshipColor(edge.relationship.type);
+      final isHighlighted =
+          selectedCharacterId == null ||
+          edge.source.id == selectedCharacterId ||
+          edge.target.id == selectedCharacterId;
       final paint = Paint()
-        ..color = color.withValues(alpha: 0.56)
+        ..color = color.withValues(alpha: isHighlighted ? 0.7 : 0.13)
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
-        ..strokeWidth = 1.4 + edge.relationship.strength.clamp(1, 5) * 0.45;
+        ..strokeWidth =
+            (1.4 + edge.relationship.strength.clamp(1, 5) * 0.45) *
+            (isHighlighted ? 1 : 0.75);
 
       canvas.drawLine(source, target, paint);
-      _drawEdgeLabel(canvas, source, target, edge.relationship.label, color);
+      if (isHighlighted) {
+        _drawEdgeLabel(canvas, source, target, edge.relationship.label, color);
+      }
     }
   }
 
@@ -790,29 +995,22 @@ class _RelationshipGraphPainter extends CustomPainter {
     );
   }
 
-  Color _relationshipColor(String type) {
-    return switch (type) {
-      'ally' => const Color(0xFF397367),
-      'family' => const Color(0xFF8A5A9E),
-      'conflict' => const Color(0xFFB4493D),
-      'romance' => const Color(0xFFC05A7A),
-      'mentor' => const Color(0xFF8B6F2F),
-      'mystery' => const Color(0xFF4D6899),
-      _ => const Color(0xFF8E7866),
-    };
-  }
-
   @override
   bool shouldRepaint(covariant _RelationshipGraphPainter oldDelegate) {
     return oldDelegate.relationships != relationships ||
-        oldDelegate.positions != positions;
+        oldDelegate.positions != positions ||
+        oldDelegate.selectedCharacterId != selectedCharacterId;
   }
 }
 
 class _RelationshipSummaryTile extends StatelessWidget {
-  const _RelationshipSummaryTile({required this.edge});
+  const _RelationshipSummaryTile({
+    required this.edge,
+    required this.isHighlighted,
+  });
 
   final _ResolvedRelationship edge;
+  final bool isHighlighted;
 
   @override
   Widget build(BuildContext context) {
@@ -820,9 +1018,19 @@ class _RelationshipSummaryTile extends StatelessWidget {
     final description = relationship.description.isEmpty
         ? '아직 자세한 관계 설명이 없습니다.'
         : relationship.description;
+    final color = _relationshipColor(relationship.type);
 
     return Card(
       margin: EdgeInsets.zero,
+      color: isHighlighted ? color.withValues(alpha: 0.06) : null,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+          color: isHighlighted
+              ? color.withValues(alpha: 0.28)
+              : const Color(0xFFE7DED4),
+        ),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Column(
@@ -849,11 +1057,14 @@ class _RelationshipSummaryTile extends StatelessWidget {
               children: [
                 Chip(
                   visualDensity: VisualDensity.compact,
+                  backgroundColor: color.withValues(alpha: 0.12),
+                  side: BorderSide(color: color.withValues(alpha: 0.26)),
                   label: Text(relationship.label),
                 ),
                 if (relationship.type.isNotEmpty)
                   Chip(
                     visualDensity: VisualDensity.compact,
+                    backgroundColor: const Color(0xFFF7F1EA),
                     label: Text(_relationshipTypeLabel(relationship.type)),
                   ),
               ],

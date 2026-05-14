@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/book.dart';
@@ -7,7 +8,7 @@ import '../models/book.dart';
 class ClaudeService {
   ClaudeService({http.Client? client}) : _client = client ?? http.Client();
 
-  static const _apiKey = String.fromEnvironment('ANTHROPIC_API_KEY');
+  static const _compileTimeApiKey = String.fromEnvironment('ANTHROPIC_API_KEY');
   static const _model = String.fromEnvironment(
     'ANTHROPIC_MODEL',
     defaultValue: 'claude-sonnet-4-20250514',
@@ -16,6 +17,11 @@ class ClaudeService {
   static const _anthropicVersion = '2023-06-01';
 
   final http.Client _client;
+
+  String get _apiKey {
+    final envKey = dotenv.env['ANTHROPIC_API_KEY'] ?? '';
+    return envKey.trim().isNotEmpty ? envKey : _compileTimeApiKey;
+  }
 
   bool get isConfigured => _apiKey.trim().isNotEmpty;
 
@@ -47,6 +53,96 @@ class ClaudeService {
     }
 
     return ClaudeAnalysisResult.fromJson(decoded);
+  }
+
+  Future<ClaudeCharacterRelationResult?> analyzeCharactersAndRelationships({
+    required Book book,
+    required String newText,
+    required String existingCharacterDb,
+  }) async {
+    if (!isConfigured || newText.trim().isEmpty) {
+      return null;
+    }
+
+    final existingCharacters = book.characters
+        .map(
+          (character) =>
+              '- ${character.name} / ${character.role}: ${character.description}',
+        )
+        .join('\n');
+    final existingRelationships = book.relationships
+        .map(
+          (relationship) =>
+              '- ${relationship.source} - ${relationship.target}: '
+              '${relationship.label}, ${relationship.description}',
+        )
+        .join('\n');
+
+    final responseText = await _sendMessage(
+      system:
+          'You are a Korean literary character-relationship analyst. '
+          'Return only valid JSON. Do not wrap in markdown. '
+          'Never invent facts that are not supported by the provided text or existing data.',
+      userPrompt:
+          '''
+책 제목: ${book.title}
+저자: ${book.author}
+
+[기존 앱 인물]
+$existingCharacters
+
+[기존 앱 관계]
+$existingRelationships
+
+[기존 내부 인물 DB]
+$existingCharacterDb
+
+[새로 스캔된 OCR 텍스트]
+$newText
+
+다음 JSON 객체만 반환하세요.
+{
+  "characters": [
+    {
+      "name": "실제 등장인물 이름",
+      "role": "짧은 역할",
+      "description": "한국어 2~3문장 누적 인물 요약"
+    }
+  ],
+  "relationships": [
+    {
+      "source": "characters에 포함된 실제 인물 이름",
+      "target": "characters에 포함된 실제 인물 이름",
+      "label": "친구|가족|협력|대립|스승과 제자|의심|보호 등 짧은 관계명",
+      "description": "두 인물의 현재 관계를 한국어 1~2문장으로 설명",
+      "evidence": "제공된 텍스트나 기존 데이터에서 확인되는 근거 요약",
+      "strength": 1,
+      "type": "ally|family|conflict|romance|mentor|mystery|neutral"
+    }
+  ]
+}
+
+규칙:
+- characters에는 실제 등장인물만 넣으세요. 군중, 사람들, 장소, 단체, 개념, 서술자, 주인공 같은 일반 표현은 제외하세요.
+- 기존 인물 데이터가 있으면 새 텍스트와 합쳐 누적 업데이트하세요. 새 텍스트에 없다는 이유만으로 기존 사실을 지우지 마세요.
+- relationships는 characters에 포함된 이름만 source/target으로 쓰세요.
+- 관계가 확인되면 최소 1개 이상 작성하세요. 단, 근거가 전혀 없으면 빈 배열을 반환하세요.
+- strength는 1~5 정수입니다. 잠깐 언급은 1, 반복되고 서사적으로 중요한 관계는 5입니다.
+- 관계 설명에는 추측이나 미래 예측을 넣지 마세요.
+''',
+      maxTokens: 1500,
+    );
+
+    if (responseText == null) {
+      return null;
+    }
+
+    final decoded = _tryDecodeJsonObject(responseText);
+    if (decoded == null) {
+      return null;
+    }
+
+    return ClaudeCharacterRelationResult.fromJson(decoded);
   }
 
   Future<String?> answerBookQuestion({
@@ -99,7 +195,7 @@ $question
     try {
       final response = await _client.post(
         Uri.parse(_apiUrl),
-        headers: const {
+        headers: {
           'content-type': 'application/json',
           'anthropic-version': _anthropicVersion,
           'x-api-key': _apiKey,
@@ -178,15 +274,117 @@ class ClaudeAnalysisResult {
 }
 
 class ClaudeCharacterResult {
-  ClaudeCharacterResult({required this.name, required this.description});
+  ClaudeCharacterResult({
+    required this.name,
+    required this.description,
+    this.role = '',
+  });
 
   final String name;
   final String description;
+  final String role;
 
   factory ClaudeCharacterResult.fromJson(Map<String, dynamic> json) {
     return ClaudeCharacterResult(
       name: (json['name'] as String? ?? '').trim(),
       description: (json['description'] as String? ?? '').trim(),
+      role: (json['role'] as String? ?? '').trim(),
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {'name': name, 'role': role, 'description': description};
+  }
+}
+
+class ClaudeRelationshipResult {
+  ClaudeRelationshipResult({
+    required this.source,
+    required this.target,
+    required this.label,
+    required this.description,
+    required this.evidence,
+    required this.strength,
+    required this.type,
+  });
+
+  final String source;
+  final String target;
+  final String label;
+  final String description;
+  final String evidence;
+  final int strength;
+  final String type;
+
+  factory ClaudeRelationshipResult.fromJson(Map<String, dynamic> json) {
+    final rawStrength = json['strength'];
+    final strength = switch (rawStrength) {
+      int value => value,
+      double value => value.round(),
+      String value => int.tryParse(value) ?? 1,
+      _ => 1,
+    };
+
+    return ClaudeRelationshipResult(
+      source: ((json['source'] as String?) ?? (json['from'] as String?) ?? '')
+          .trim(),
+      target: ((json['target'] as String?) ?? (json['to'] as String?) ?? '')
+          .trim(),
+      label: (json['label'] as String? ?? '').trim(),
+      description: (json['description'] as String? ?? '').trim(),
+      evidence: (json['evidence'] as String? ?? '').trim(),
+      strength: strength.clamp(1, 5),
+      type: (json['type'] as String? ?? 'neutral').trim(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'source': source,
+      'target': target,
+      'label': label,
+      'description': description,
+      'evidence': evidence,
+      'strength': strength,
+      'type': type,
+    };
+  }
+}
+
+class ClaudeCharacterRelationResult {
+  ClaudeCharacterRelationResult({
+    required this.characters,
+    required this.relationships,
+  });
+
+  final List<ClaudeCharacterResult> characters;
+  final List<ClaudeRelationshipResult> relationships;
+
+  factory ClaudeCharacterRelationResult.fromJson(Map<String, dynamic> json) {
+    return ClaudeCharacterRelationResult(
+      characters: (json['characters'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(ClaudeCharacterResult.fromJson)
+          .where((character) => character.name.isNotEmpty)
+          .toList(),
+      relationships: (json['relationships'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(ClaudeRelationshipResult.fromJson)
+          .where(
+            (relationship) =>
+                relationship.source.isNotEmpty &&
+                relationship.target.isNotEmpty &&
+                relationship.label.isNotEmpty,
+          )
+          .toList(),
+    );
+  }
+
+  List<Map<String, dynamic>> charactersAsJson() {
+    return characters.map((character) => character.toJson()).toList();
+  }
+
+  List<Map<String, dynamic>> relationshipsAsJson() {
+    return relationships.map((relationship) => relationship.toJson()).toList();
   }
 }
