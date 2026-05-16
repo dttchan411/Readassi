@@ -13,6 +13,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import '../app_state.dart';
 import '../services/claude_service.dart';
+import '../services/hand_detection_service.dart';
 import 'book_detail_screen.dart';
 import 'scan_camera_view.dart';
 import 'page_extractor.dart';
@@ -35,10 +36,12 @@ class _ScanScreenState extends State<ScanScreen> {
   static const Duration _frameProcessingThrottle = Duration(milliseconds: 250);
   static const double _motionDiffThreshold = 12.0;
   static const int _lumaSampleCount = 64;
+  static const Duration _handDetectionThrottle = Duration(milliseconds: 700);
 
   final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
   final ClaudeService _claudeService = ClaudeService();
+  final HandDetectionService _handDetectionService = HandDetectionService();
 
   bool _isAutoMode = false;
   _PageCandidate? _pendingPageCandidate;
@@ -61,6 +64,11 @@ class _ScanScreenState extends State<ScanScreen> {
 
   final List<Future<void>> _ocrQueue = [];
   int _pendingOcrCount = 0;
+
+  bool _debugPanelEnabled = false;
+  bool _handDetectionBusy = false;
+  DateTime? _lastHandDetectionAt;
+  HandDetectionResult? _handResult;
 
   @override
   void initState() {
@@ -275,6 +283,8 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastCaptureAt = null;
       _lastFrameProcessedAt = null;
       _lastFrameSignature = null;
+      _lastHandDetectionAt = null;
+      _handResult = null;
     });
 
     await _ensureImageStreamRunning();
@@ -332,6 +342,8 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastCaptureAt = null;
       _lastFrameProcessedAt = null;
       _lastFrameSignature = null;
+      _lastHandDetectionAt = null;
+      _handResult = null;
     });
 
     if (!mounted) return;
@@ -365,6 +377,11 @@ class _ScanScreenState extends State<ScanScreen> {
     if (!_isAutoMode || _isCaptureBusy || _isProcessingAnalysis) return;
 
     final now = DateTime.now();
+
+    if (_debugPanelEnabled) {
+      _maybeRunHandDetection(image, now);
+    }
+
     if (_lastFrameProcessedAt != null &&
         now.difference(_lastFrameProcessedAt!) < _frameProcessingThrottle) {
       return;
@@ -400,6 +417,25 @@ class _ScanScreenState extends State<ScanScreen> {
     if (cooldownFinished && stableDuration >= _stabilityRequiredDuration) {
       await _captureSinglePage();
     }
+  }
+
+  // 디버그 패널용 손 감지. 밝기 게이트와 무관하게 자체 스로틀로 띄엄띄엄 실행한다.
+  void _maybeRunHandDetection(CameraImage image, DateTime now) {
+    if (_handDetectionBusy) return;
+    if (_lastHandDetectionAt != null &&
+        now.difference(_lastHandDetectionAt!) < _handDetectionThrottle) {
+      return;
+    }
+    _lastHandDetectionAt = now;
+    _handDetectionBusy = true;
+
+    _handDetectionService
+        .detect(image)
+        .then((result) {
+          if (!mounted) return;
+          setState(() => _handResult = result);
+        })
+        .whenComplete(() => _handDetectionBusy = false);
   }
 
   List<int> _buildFrameSignature(CameraImage image) {
@@ -910,6 +946,21 @@ $newText
                       ],
                     ),
                   ),
+                  IconButton(
+                    tooltip: "디버그 패널",
+                    icon: Icon(
+                      _debugPanelEnabled
+                          ? Icons.bug_report
+                          : Icons.bug_report_outlined,
+                      size: 22,
+                      color: _debugPanelEnabled
+                          ? const Color(0xFFB5651D)
+                          : Colors.black54,
+                    ),
+                    onPressed: () => setState(
+                      () => _debugPanelEnabled = !_debugPanelEnabled,
+                    ),
+                  ),
                   SizedBox(
                     width: 78,
                     child: _pendingOcrCount > 0
@@ -946,6 +997,8 @@ $newText
                 onAnalyzePressed: _performAnalysis,
                 onCapturePressed: _startAutoCapture,
                 onStopPressed: _stopAutoCapture,
+                debugEnabled: _debugPanelEnabled,
+                handResult: _handResult,
               ),
             ),
           ],

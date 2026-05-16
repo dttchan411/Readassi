@@ -19,6 +19,10 @@ android {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
+    androidResources {
+        noCompress += "task"
+    }
+
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.readassi_flutter"
@@ -49,4 +53,5 @@ flutter {
 
 dependencies {
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
 }

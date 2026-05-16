@@ -1,6 +1,8 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import '../services/hand_detection_service.dart';
+
 class ScanCameraView extends StatelessWidget {
   final CameraController controller;
   final double currentZoomLevel;
@@ -10,6 +12,8 @@ class ScanCameraView extends StatelessWidget {
   final VoidCallback onAnalyzePressed;
   final VoidCallback onCapturePressed;
   final VoidCallback onStopPressed;
+  final bool debugEnabled;
+  final HandDetectionResult? handResult;
 
   const ScanCameraView({
     super.key,
@@ -21,6 +25,8 @@ class ScanCameraView extends StatelessWidget {
     required this.onAnalyzePressed,
     required this.onCapturePressed,
     required this.onStopPressed,
+    this.debugEnabled = false,
+    this.handResult,
   });
 
   @override
@@ -34,9 +40,18 @@ class ScanCameraView extends StatelessWidget {
             child: GestureDetector(
               onScaleStart: (details) {},
               onScaleUpdate: (details) {},
-              child: Container(
-                color: Colors.black,
-                child: CameraPreview(controller),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Container(
+                    color: Colors.black,
+                    child: CameraPreview(controller),
+                  ),
+                  if (debugEnabled && handResult != null)
+                    CustomPaint(
+                      painter: _HandBoxPainter(handResult!.boxes),
+                    ),
+                ],
               ),
             ),
           ),
@@ -138,6 +153,14 @@ class ScanCameraView extends StatelessWidget {
           ),
         ),
 
+        if (debugEnabled)
+          Positioned(
+            top: 8,
+            left: 0,
+            right: 0,
+            child: Center(child: _buildDebugPanel()),
+          ),
+
         if (isProcessing)
           Container(
             color: Colors.black54,
@@ -156,6 +179,65 @@ class ScanCameraView extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _buildDebugPanel() {
+    final result = handResult;
+    final lines = <Widget>[
+      const Text(
+        "디버그 · 손 감지",
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 12.5,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    ];
+
+    if (!isCapturing) {
+      lines.add(_debugLine("촬영 시작 후 손 감지가 동작합니다.", Colors.white70));
+    } else if (result == null) {
+      lines.add(_debugLine("프레임 분석 대기 중...", Colors.white70));
+    } else if (result.error != null) {
+      lines.add(_debugLine("오류: ${result.error}", const Color(0xFFFF8A80)));
+    } else {
+      lines.add(
+        _debugLine(
+          result.detected ? "손 감지: 예" : "손 감지: 아니오",
+          result.detected ? const Color(0xFF69F0AE) : Colors.white,
+        ),
+      );
+      lines.add(
+        _debugLine(
+          "감지된 손: ${result.handCount}개   지연: ${result.latencyMs} ms",
+          Colors.white70,
+        ),
+      );
+    }
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 280),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: lines,
+      ),
+    );
+  }
+
+  Widget _debugLine(String text, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Text(
+        text,
+        style: TextStyle(color: color, fontSize: 12),
+      ),
     );
   }
 
@@ -196,4 +278,33 @@ class ScanCameraView extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 정규화 좌표로 받은 손 박스를 카메라 프리뷰 위에 그린다.
+class _HandBoxPainter extends CustomPainter {
+  _HandBoxPainter(this.boxes);
+
+  final List<HandBox> boxes;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = Paint()
+      ..color = const Color(0xFF69F0AE)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    for (final box in boxes) {
+      final rect = Rect.fromLTRB(
+        box.left * size.width,
+        box.top * size.height,
+        box.right * size.width,
+        box.bottom * size.height,
+      );
+      canvas.drawRect(rect, stroke);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_HandBoxPainter oldDelegate) =>
+      oldDelegate.boxes != boxes;
 }
