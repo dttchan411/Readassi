@@ -14,6 +14,13 @@ class ScanCameraView extends StatelessWidget {
   final VoidCallback onStopPressed;
   final bool debugEnabled;
   final HandDetectionResult? handResult;
+  final String captureStatusLabel;
+  final String? ocrSummary;
+  final bool handLatched;
+  final HandBox? trackedHandBox;
+  final double bottomRegionTop;
+  final bool handCoversText;
+  final ValueChanged<double>? onBottomRegionChanged;
 
   const ScanCameraView({
     super.key,
@@ -27,6 +34,13 @@ class ScanCameraView extends StatelessWidget {
     required this.onStopPressed,
     this.debugEnabled = false,
     this.handResult,
+    this.captureStatusLabel = '대기 중',
+    this.ocrSummary,
+    this.handLatched = false,
+    this.trackedHandBox,
+    this.bottomRegionTop = 0.80,
+    this.handCoversText = false,
+    this.onBottomRegionChanged,
   });
 
   @override
@@ -47,9 +61,13 @@ class ScanCameraView extends StatelessWidget {
                     color: Colors.black,
                     child: CameraPreview(controller),
                   ),
-                  if (debugEnabled && handResult != null)
+                  if (debugEnabled)
                     CustomPaint(
-                      painter: _HandBoxPainter(handResult!.boxes),
+                      painter: _HandBoxPainter(
+                        handResult?.boxes ?? const [],
+                        trackedHandBox,
+                        bottomRegionTop,
+                      ),
                     ),
                 ],
               ),
@@ -186,13 +204,14 @@ class ScanCameraView extends StatelessWidget {
     final result = handResult;
     final lines = <Widget>[
       const Text(
-        "디버그 · 손 감지",
+        "디버그 · 손 가림 OCR",
         style: TextStyle(
           color: Colors.white,
           fontSize: 12.5,
           fontWeight: FontWeight.w700,
         ),
       ),
+      _debugLine("상태: $captureStatusLabel", const Color(0xFFFFD180)),
     ];
 
     if (!isCapturing) {
@@ -212,6 +231,53 @@ class ScanCameraView extends StatelessWidget {
         _debugLine(
           "감지된 손: ${result.handCount}개   지연: ${result.latencyMs} ms",
           Colors.white70,
+        ),
+      );
+      if (handLatched && !result.detected) {
+        lines.add(
+          _debugLine(
+            "추적 유지 중 — 손 있음으로 간주",
+            const Color(0xFFFFB300),
+          ),
+        );
+      }
+      if (handLatched) {
+        lines.add(
+          _debugLine(
+            handCoversText ? "손 위치: 본문 가림" : "손 위치: 하단 여백 (촬영 허용)",
+            handCoversText
+                ? const Color(0xFFFF8A80)
+                : const Color(0xFF69F0AE),
+          ),
+        );
+      }
+    }
+
+    final ocr = ocrSummary;
+    if (ocr != null) {
+      lines.add(_debugLine("최근 OCR 결과", const Color(0xFF82B1FF)));
+      lines.add(_debugLine(ocr, Colors.white70));
+    }
+
+    final onRegionChanged = onBottomRegionChanged;
+    if (onRegionChanged != null) {
+      lines.add(
+        _debugLine(
+          "하단 경계: ${(bottomRegionTop * 100).round()}%  (슬라이더로 조절)",
+          const Color(0xFF00E5FF),
+        ),
+      );
+      lines.add(
+        SizedBox(
+          width: 250,
+          child: Slider(
+            value: bottomRegionTop.clamp(0.5, 0.95),
+            min: 0.5,
+            max: 0.95,
+            activeColor: const Color(0xFF00E5FF),
+            inactiveColor: Colors.white24,
+            onChanged: onRegionChanged,
+          ),
         ),
       );
     }
@@ -281,30 +347,60 @@ class ScanCameraView extends StatelessWidget {
 }
 
 /// 정규화 좌표로 받은 손 박스를 카메라 프리뷰 위에 그린다.
+/// 검출된 손은 초록, 추적으로 유지 중인 마지막 위치는 주황으로 표시하고,
+/// 하단 여백(촬영 허용 구역)을 청록 경계선과 옅은 음영으로 나타낸다.
 class _HandBoxPainter extends CustomPainter {
-  _HandBoxPainter(this.boxes);
+  _HandBoxPainter(this.boxes, this.trackedBox, this.bottomRegionTop);
 
   final List<HandBox> boxes;
+  final HandBox? trackedBox;
+  final double bottomRegionTop;
+
+  void _drawBox(Canvas canvas, Size size, HandBox box, Color color) {
+    final stroke = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+    final rect = Rect.fromLTRB(
+      box.left * size.width,
+      box.top * size.height,
+      box.right * size.width,
+      box.bottom * size.height,
+    );
+    canvas.drawRect(rect, stroke);
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final stroke = Paint()
-      ..color = const Color(0xFF69F0AE)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
+    // 하단 여백(촬영 허용) 영역 표시
+    final regionY = bottomRegionTop * size.height;
+    canvas.drawRect(
+      Rect.fromLTRB(0, regionY, size.width, size.height),
+      Paint()
+        ..color = const Color(0x2200B8D4)
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawLine(
+      Offset(0, regionY),
+      Offset(size.width, regionY),
+      Paint()
+        ..color = const Color(0xFF00B8D4)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
 
     for (final box in boxes) {
-      final rect = Rect.fromLTRB(
-        box.left * size.width,
-        box.top * size.height,
-        box.right * size.width,
-        box.bottom * size.height,
-      );
-      canvas.drawRect(rect, stroke);
+      _drawBox(canvas, size, box, const Color(0xFF69F0AE));
+    }
+    final tracked = trackedBox;
+    if (tracked != null) {
+      _drawBox(canvas, size, tracked, const Color(0xFFFFB300));
     }
   }
 
   @override
   bool shouldRepaint(_HandBoxPainter oldDelegate) =>
-      oldDelegate.boxes != boxes;
+      oldDelegate.boxes != boxes ||
+      oldDelegate.trackedBox != trackedBox ||
+      oldDelegate.bottomRegionTop != bottomRegionTop;
 }

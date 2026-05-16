@@ -37,6 +37,18 @@ class _ScanScreenState extends State<ScanScreen> {
   static const double _motionDiffThreshold = 12.0;
   static const int _lumaSampleCount = 64;
   static const Duration _handDetectionThrottle = Duration(milliseconds: 700);
+  // 촬영 직전 손 게이트가 신뢰할 손 감지 결과의 최대 허용 나이.
+  static const Duration _handResultMaxAge = Duration(milliseconds: 1600);
+  // 손 래치(추적 유지) 파라미터.
+  // 손이 작아지며 빠져나가던 중이면 짧은 유예 후 해제.
+  static const Duration _handExitGrace = Duration(milliseconds: 500);
+  // 큰 손이 갑자기 사라지면(화면 밖으로만 나감) 더 오래 유지.
+  static const Duration _handLatchTimeout = Duration(milliseconds: 2600);
+  // 마지막 손 크기가 최대 크기 대비 이 비율 이하면 '빠져나가던 중'으로 본다.
+  static const double _handExitShrinkRatio = 0.5;
+  // 하단 여백 경계 슬라이더의 허용 범위.
+  static const double _bottomRegionMin = 0.5;
+  static const double _bottomRegionMax = 0.95;
 
   final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
@@ -69,6 +81,21 @@ class _ScanScreenState extends State<ScanScreen> {
   bool _handDetectionBusy = false;
   DateTime? _lastHandDetectionAt;
   HandDetectionResult? _handResult;
+  DateTime? _handResultAt;
+
+  _CaptureStatus _captureStatus = _CaptureStatus.idle;
+  String? _lastOcrSummary;
+
+  // 손 래치: 한 번 검출된 손은 검출이 끊겨도 일정 조건까지 '있음'으로 유지한다.
+  bool _handLatched = false;
+  HandBox? _lastHandBox;
+  DateTime? _lastHandSeenAt;
+  double _lastHandArea = 0;
+  double _peakHandArea = 0;
+
+  // 손 위치 게이트: 손 박스가 이 높이 비율 아래(하단 여백)에 완전히 들어가
+  // 있으면 본문을 안 가린 것으로 보고 촬영을 허용한다. 디버그 패널 슬라이더로 조절.
+  double _bottomRegionTop = 0.80;
 
   @override
   void initState() {
@@ -153,6 +180,7 @@ class _ScanScreenState extends State<ScanScreen> {
       final text = await _getVisionText(bytes);
       final lines = text.split('\n').where((l) => l.trim().isNotEmpty).toList();
       final snapshot = _buildSnapshot(text, lines);
+      _updateOcrSummary(snapshot);
 
       if (!_isUsefulOcrResult(snapshot)) {
         debugPrint("OCR 결과가 너무 짧거나 불안정해서 저장하지 않습니다.");
@@ -285,6 +313,14 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastFrameSignature = null;
       _lastHandDetectionAt = null;
       _handResult = null;
+      _handResultAt = null;
+      _captureStatus = _CaptureStatus.motion;
+      _lastOcrSummary = null;
+      _handLatched = false;
+      _lastHandBox = null;
+      _lastHandSeenAt = null;
+      _lastHandArea = 0;
+      _peakHandArea = 0;
     });
 
     await _ensureImageStreamRunning();
@@ -344,6 +380,13 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastFrameSignature = null;
       _lastHandDetectionAt = null;
       _handResult = null;
+      _handResultAt = null;
+      _captureStatus = _CaptureStatus.idle;
+      _handLatched = false;
+      _lastHandBox = null;
+      _lastHandSeenAt = null;
+      _lastHandArea = 0;
+      _peakHandArea = 0;
     });
 
     if (!mounted) return;
@@ -378,9 +421,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
     final now = DateTime.now();
 
-    if (_debugPanelEnabled) {
-      _maybeRunHandDetection(image, now);
-    }
+    // 손 감지는 디버그 토글과 무관하게 촬영 중 항상 실행한다(촬영 게이트가 사용).
+    _maybeRunHandDetection(image, now);
 
     if (_lastFrameProcessedAt != null &&
         now.difference(_lastFrameProcessedAt!) < _frameProcessingThrottle) {
@@ -402,10 +444,15 @@ class _ScanScreenState extends State<ScanScreen> {
     if (diff >= _motionDiffThreshold) {
       _stableSince = null;
       _awaitingMotionBeforeNextCapture = false;
+      _setCaptureStatus(_CaptureStatus.motion);
       return;
     }
 
-    if (_awaitingMotionBeforeNextCapture) return;
+    if (_awaitingMotionBeforeNextCapture) {
+      // 직전 촬영 후 다음 페이지로 넘기는 움직임을 기다리는 중.
+      _setCaptureStatus(_CaptureStatus.motion);
+      return;
+    }
 
     _stableSince ??= now;
 
@@ -414,9 +461,36 @@ class _ScanScreenState extends State<ScanScreen> {
         _lastCaptureAt == null ||
         now.difference(_lastCaptureAt!) >= _captureCooldownDuration;
 
-    if (cooldownFinished && stableDuration >= _stabilityRequiredDuration) {
-      await _captureSinglePage();
+    if (!(cooldownFinished && stableDuration >= _stabilityRequiredDuration)) {
+      // 아직 안정 시간이 모자람 — 안정될 때까지 대기.
+      _setCaptureStatus(_CaptureStatus.motion);
+      return;
     }
+
+    // 안정됨 → 촬영 직전, 손이 본문(=전체 프레임)과 겹치는지 검사한다.
+    final hand = _handResult;
+    final handFresh =
+        hand != null &&
+        _handResultAt != null &&
+        now.difference(_handResultAt!) <= _handResultMaxAge;
+
+    if (hand == null || !handFresh || hand.error != null) {
+      // 최신 손 감지 결과가 아직 없음 — 확정될 때까지 촬영을 보류한다.
+      _setCaptureStatus(_CaptureStatus.checkingHand);
+      return;
+    }
+
+    if (_handLatched && _handCoversText()) {
+      // 손이 본문 영역(하단 여백 위쪽)을 가림 → 깨끗한 프레임이 아님.
+      // 명령 2에서는 대기만 한다(겹친 프레임의 줄 단위 누적은 명령 3 범위).
+      _setCaptureStatus(_CaptureStatus.handOverlap);
+      return;
+    }
+    // 손이 검출/추적되더라도 하단 여백 영역 안에만 있으면 본문은 안 가린 것으로 본다.
+
+    // 손이 본문과 안 겹침 → 깨끗한 프레임. 기존 Vision OCR 흐름을 진행한다.
+    _setCaptureStatus(_CaptureStatus.capturing);
+    await _captureSinglePage();
   }
 
   // 디버그 패널용 손 감지. 밝기 게이트와 무관하게 자체 스로틀로 띄엄띄엄 실행한다.
@@ -433,9 +507,158 @@ class _ScanScreenState extends State<ScanScreen> {
         .detect(image)
         .then((result) {
           if (!mounted) return;
-          setState(() => _handResult = result);
+          final at = DateTime.now();
+          setState(() {
+            _handResult = result;
+            _handResultAt = at;
+            _updateHandLatch(result, at);
+          });
         })
         .whenComplete(() => _handDetectionBusy = false);
+  }
+
+  // 손 래치 갱신: 한 번 검출된 손은 검출이 끊겨도 일정 조건까지 '있음'으로 유지한다.
+  void _updateHandLatch(HandDetectionResult result, DateTime now) {
+    if (result.error != null) {
+      // 감지 오류 시 래치 상태를 보수적으로 그대로 둔다.
+      return;
+    }
+
+    if (result.detected && result.boxes.isNotEmpty) {
+      final box = _largestHandBox(result.boxes);
+      final area = _boxArea(box);
+      _lastHandBox = box;
+      _lastHandArea = area;
+      _lastHandSeenAt = now;
+      if (!_handLatched) {
+        _handLatched = true;
+        _peakHandArea = area;
+      } else if (area > _peakHandArea) {
+        _peakHandArea = area;
+      }
+      return;
+    }
+
+    // 검출이 끊김 — 래치돼 있으면 풀지 여부를 판정한다.
+    if (!_handLatched) return;
+    final lastSeen = _lastHandSeenAt;
+    if (lastSeen == null) {
+      _clearHandLatch();
+      return;
+    }
+
+    final sinceSeen = now.difference(lastSeen);
+    // 마지막에 본 손이 최대 크기 대비 충분히 작아졌으면(=빠져나가던 중) 빨리 해제,
+    // 큰 상태로 갑자기 사라졌으면(=화면 밖으로만 나감, 본문 여전히 가림) 오래 유지.
+    final wasShrinking =
+        _peakHandArea > 0 &&
+        _lastHandArea <= _peakHandArea * _handExitShrinkRatio;
+    final wasTiny = _lastHandArea <= 0.04;
+    final wasExiting = wasShrinking || wasTiny;
+
+    final expired = wasExiting
+        ? sinceSeen >= _handExitGrace
+        : sinceSeen >= _handLatchTimeout;
+    if (expired) {
+      _clearHandLatch();
+    }
+  }
+
+  void _clearHandLatch() {
+    _handLatched = false;
+    _lastHandBox = null;
+    _lastHandSeenAt = null;
+    _lastHandArea = 0;
+    _peakHandArea = 0;
+  }
+
+  HandBox _largestHandBox(List<HandBox> boxes) {
+    HandBox best = boxes.first;
+    double bestArea = _boxArea(best);
+    for (final box in boxes.skip(1)) {
+      final area = _boxArea(box);
+      if (area > bestArea) {
+        best = box;
+        bestArea = area;
+      }
+    }
+    return best;
+  }
+
+  double _boxArea(HandBox box) {
+    final width = (box.right - box.left).clamp(0.0, 1.0);
+    final height = (box.bottom - box.top).clamp(0.0, 1.0);
+    return width * height;
+  }
+
+  // 게이트 판정에 쓸 손 박스 목록: 실시간 검출 박스가 있으면 그걸,
+  // 검출이 끊겨 추적 유지 중이면 마지막으로 본 박스를 쓴다.
+  List<HandBox> _effectiveHandBoxes() {
+    final live = _handResult?.boxes ?? const <HandBox>[];
+    if (live.isNotEmpty) return live;
+    final last = _lastHandBox;
+    if (_handLatched && last != null) return [last];
+    return const [];
+  }
+
+  // 손이 본문 영역(하단 여백 위쪽)을 가리는지 판정한다.
+  // 손 박스 윗변이 하단 여백 경계보다 위에 있으면 본문을 가리는 것으로 본다.
+  bool _handCoversText() {
+    final boxes = _effectiveHandBoxes();
+    if (boxes.isEmpty) return true; // 위치 정보 없음 → 보수적으로 가림 간주
+    for (final box in boxes) {
+      if (box.top < _bottomRegionTop) return true;
+    }
+    return false;
+  }
+
+  // 디버그 패널 슬라이더에서 하단 여백 경계를 조절한다.
+  void _updateBottomRegionTop(double value) {
+    final clamped = value.clamp(_bottomRegionMin, _bottomRegionMax);
+    if (clamped == _bottomRegionTop || !mounted) return;
+    setState(() => _bottomRegionTop = clamped);
+  }
+
+  // 검출이 끊겨 추적으로 유지 중인 마지막 손 위치(디버그 오버레이용).
+  HandBox? get _trackedHandBox {
+    if (!_handLatched) return null;
+    final liveBoxes = _handResult?.boxes ?? const <HandBox>[];
+    return liveBoxes.isEmpty ? _lastHandBox : null;
+  }
+
+  // 촬영 상태를 갱신한다(값이 바뀔 때만 setState).
+  void _setCaptureStatus(_CaptureStatus status) {
+    if (_captureStatus == status || !mounted) return;
+    setState(() => _captureStatus = status);
+  }
+
+  // 디버그 패널에 보여줄 현재 촬영 상태 라벨.
+  String get _captureStatusLabel {
+    switch (_captureStatus) {
+      case _CaptureStatus.idle:
+        return '대기 중';
+      case _CaptureStatus.motion:
+        return '움직임 감지중';
+      case _CaptureStatus.checkingHand:
+        return '안정 · 손 검사중';
+      case _CaptureStatus.handOverlap:
+        return '손 겹침 · 대기';
+      case _CaptureStatus.capturing:
+        return '깨끗 · OCR중';
+    }
+  }
+
+  // 디버그 패널에 보여줄 최근 OCR 결과 요약을 갱신한다.
+  void _updateOcrSummary(_OcrTextSnapshot snapshot) {
+    final fullText = snapshot.fullText;
+    final preview = fullText.length > 70
+        ? '${fullText.substring(0, 70)}…'
+        : fullText;
+    final summary = fullText.isEmpty
+        ? 'OCR 결과 없음'
+        : '${snapshot.textLength}자 · ${snapshot.lineCount}줄\n$preview';
+    if (!mounted) return;
+    setState(() => _lastOcrSummary = summary);
   }
 
   List<int> _buildFrameSignature(CameraImage image) {
@@ -999,6 +1222,13 @@ $newText
                 onStopPressed: _stopAutoCapture,
                 debugEnabled: _debugPanelEnabled,
                 handResult: _handResult,
+                captureStatusLabel: _captureStatusLabel,
+                ocrSummary: _lastOcrSummary,
+                handLatched: _handLatched,
+                trackedHandBox: _trackedHandBox,
+                bottomRegionTop: _bottomRegionTop,
+                handCoversText: _handLatched && _handCoversText(),
+                onBottomRegionChanged: _updateBottomRegionTop,
               ),
             ),
           ],
@@ -1038,4 +1268,13 @@ class _PageCandidate {
   final _OcrTextSnapshot snapshot;
   final int? pageNumber;
   final int qualityScore;
+}
+
+/// 자동 촬영 진행 상태(디버그 패널 표시 및 손 게이트용).
+enum _CaptureStatus {
+  idle, // 대기 중 (촬영 시작 전)
+  motion, // 움직임 감지중 / 안정화 대기
+  checkingHand, // 안정됨, 손 감지 결과 확인 중
+  handOverlap, // 손이 본문과 겹침 → 대기
+  capturing, // 깨끗한 프레임 → 촬영·OCR 진행 중
 }

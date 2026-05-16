@@ -20,15 +20,21 @@ class HandDetector(context: Context) {
 
     private val landmarker: HandLandmarker
 
+    // VIDEO 모드는 단조 증가하는 타임스탬프를 요구한다.
+    private var lastVideoTimestampMs = 0L
+
     init {
         val baseOptions = BaseOptions.builder()
             .setModelAssetPath("hand_landmarker.task")
             .build()
+        // VIDEO 모드: 한 번 잡은 손을 프레임 간 추적해 부분 가림에도 더 오래 버틴다.
         val options = HandLandmarker.HandLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.IMAGE)
+            .setRunningMode(RunningMode.VIDEO)
             .setNumHands(2)
             .setMinHandDetectionConfidence(0.5f)
+            .setMinHandPresenceConfidence(0.3f)
+            .setMinTrackingConfidence(0.3f)
             .build()
         landmarker = HandLandmarker.createFromOptions(context, options)
     }
@@ -57,7 +63,12 @@ class HandDetector(context: Context) {
             ?: throw IllegalStateException("YUV 프레임을 비트맵으로 디코드하지 못했습니다.")
 
         val mpImage = BitmapImageBuilder(bitmap).build()
-        val result = landmarker.detect(mpImage)
+        var timestampMs = System.currentTimeMillis()
+        if (timestampMs <= lastVideoTimestampMs) {
+            timestampMs = lastVideoTimestampMs + 1
+        }
+        lastVideoTimestampMs = timestampMs
+        val result = landmarker.detectForVideo(mpImage, timestampMs)
 
         val boxes = ArrayList<List<Double>>()
         for (hand in result.landmarks()) {
