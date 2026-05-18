@@ -21,6 +21,14 @@ class ScanCameraView extends StatelessWidget {
   final double bottomRegionTop;
   final bool handCoversText;
   final ValueChanged<double>? onBottomRegionChanged;
+  final double spineX;
+  final bool spineManualOverride;
+  final ValueChanged<double>? onSpineChanged;
+  final VoidCallback? onSpineAutoReset;
+  final int bandCount;
+  final List<bool> bandCoverage;
+  final List<bool> bandCollected;
+  final VoidCallback? onShowFullOcr;
 
   const ScanCameraView({
     super.key,
@@ -41,6 +49,14 @@ class ScanCameraView extends StatelessWidget {
     this.bottomRegionTop = 0.80,
     this.handCoversText = false,
     this.onBottomRegionChanged,
+    this.spineX = 0.5,
+    this.spineManualOverride = false,
+    this.onSpineChanged,
+    this.onSpineAutoReset,
+    this.bandCount = 4,
+    this.bandCoverage = const [],
+    this.bandCollected = const [],
+    this.onShowFullOcr,
   });
 
   @override
@@ -67,6 +83,10 @@ class ScanCameraView extends StatelessWidget {
                         handResult?.boxes ?? const [],
                         trackedHandBox,
                         bottomRegionTop,
+                        spineX,
+                        bandCount,
+                        bandCoverage,
+                        bandCollected,
                       ),
                     ),
                 ],
@@ -253,10 +273,62 @@ class ScanCameraView extends StatelessWidget {
       }
     }
 
+    if (bandCoverage.isNotEmpty) {
+      final marks = StringBuffer();
+      int collectedCount = 0;
+      for (int i = 0; i < bandCoverage.length; i++) {
+        final collected = i < bandCollected.length && bandCollected[i];
+        if (collected) {
+          marks.write('●');
+          collectedCount++;
+        } else if (bandCoverage[i]) {
+          marks.write('■');
+        } else {
+          marks.write('□');
+        }
+      }
+      lines.add(
+        _debugLine(
+          "띠 수집(명령 3): $marks  $collectedCount/${bandCoverage.length}",
+          const Color(0xFFFFD180),
+        ),
+      );
+      lines.add(_debugLine("●수집됨  ■손가림  □대기", Colors.white54));
+    }
+
     final ocr = ocrSummary;
     if (ocr != null) {
       lines.add(_debugLine("최근 OCR 결과", const Color(0xFF82B1FF)));
       lines.add(_debugLine(ocr, Colors.white70));
+    }
+
+    if (onShowFullOcr != null) {
+      lines.add(
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: GestureDetector(
+            onTap: onShowFullOcr,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 6,
+              ),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E88E5),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Text(
+                "OCR 결과 전체보기",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
     }
 
     final onRegionChanged = onBottomRegionChanged;
@@ -280,6 +352,58 @@ class ScanCameraView extends StatelessWidget {
           ),
         ),
       );
+    }
+
+    final onSpine = onSpineChanged;
+    if (onSpine != null) {
+      lines.add(
+        _debugLine(
+          "책등 위치(명령 3): ${(spineX * 100).round()}%  "
+              "(${spineManualOverride ? '수동 보정' : '자동 감지'})",
+          const Color(0xFFE040FB),
+        ),
+      );
+      lines.add(
+        SizedBox(
+          width: 250,
+          child: Slider(
+            value: spineX.clamp(0.30, 0.70),
+            min: 0.30,
+            max: 0.70,
+            activeColor: const Color(0xFFE040FB),
+            inactiveColor: Colors.white24,
+            onChanged: onSpine,
+          ),
+        ),
+      );
+      if (spineManualOverride && onSpineAutoReset != null) {
+        lines.add(
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: GestureDetector(
+              onTap: onSpineAutoReset,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF7B1FA2),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  "책등 자동 감지로 되돌리기",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
     }
 
     return Container(
@@ -346,15 +470,27 @@ class ScanCameraView extends StatelessWidget {
   }
 }
 
-/// 정규화 좌표로 받은 손 박스를 카메라 프리뷰 위에 그린다.
-/// 검출된 손은 초록, 추적으로 유지 중인 마지막 위치는 주황으로 표시하고,
-/// 하단 여백(촬영 허용 구역)을 청록 경계선과 옅은 음영으로 나타낸다.
+/// 디버그 오버레이를 카메라 프리뷰 위에 그린다.
+/// 검출된 손은 초록, 추적 유지 중인 위치는 주황, 하단 여백은 청록으로 표시하고,
+/// 명령 3의 가로 띠 경계선과 손이 덮은 띠(빨강 음영)를 나타낸다.
 class _HandBoxPainter extends CustomPainter {
-  _HandBoxPainter(this.boxes, this.trackedBox, this.bottomRegionTop);
+  _HandBoxPainter(
+    this.boxes,
+    this.trackedBox,
+    this.bottomRegionTop,
+    this.spineX,
+    this.bandCount,
+    this.bandCoverage,
+    this.bandCollected,
+  );
 
   final List<HandBox> boxes;
   final HandBox? trackedBox;
   final double bottomRegionTop;
+  final double spineX;
+  final int bandCount;
+  final List<bool> bandCoverage;
+  final List<bool> bandCollected;
 
   void _drawBox(Canvas canvas, Size size, HandBox box, Color color) {
     final stroke = Paint()
@@ -389,6 +525,50 @@ class _HandBoxPainter extends CustomPainter {
         ..strokeWidth = 2,
     );
 
+    // 명령 3: 가로 띠 경계선 + 손이 덮은 띠 빨강 음영
+    if (bandCount > 0) {
+      final dividerPaint = Paint()
+        ..color = const Color(0x66FFFFFF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1;
+      for (int i = 0; i < bandCount; i++) {
+        final bandTop = (i / bandCount) * size.height;
+        final bandBottom = ((i + 1) / bandCount) * size.height;
+        final collected = i < bandCollected.length && bandCollected[i];
+        final covered = i < bandCoverage.length && bandCoverage[i];
+        // 수집된 띠는 초록, 손이 가린 띠는 빨강 음영.
+        final Color? fill = collected
+            ? const Color(0x3369F0AE)
+            : (covered ? const Color(0x33FF5252) : null);
+        if (fill != null) {
+          canvas.drawRect(
+            Rect.fromLTRB(0, bandTop, size.width, bandBottom),
+            Paint()
+              ..color = fill
+              ..style = PaintingStyle.fill,
+          );
+        }
+        if (i > 0) {
+          canvas.drawLine(
+            Offset(0, bandTop),
+            Offset(size.width, bandTop),
+            dividerPaint,
+          );
+        }
+      }
+    }
+
+    // 명령 3: 책등(좌우 페이지 분리) 세로선
+    final spineXPix = spineX * size.width;
+    canvas.drawLine(
+      Offset(spineXPix, 0),
+      Offset(spineXPix, size.height),
+      Paint()
+        ..color = const Color(0xFFE040FB)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5,
+    );
+
     for (final box in boxes) {
       _drawBox(canvas, size, box, const Color(0xFF69F0AE));
     }
@@ -402,5 +582,9 @@ class _HandBoxPainter extends CustomPainter {
   bool shouldRepaint(_HandBoxPainter oldDelegate) =>
       oldDelegate.boxes != boxes ||
       oldDelegate.trackedBox != trackedBox ||
-      oldDelegate.bottomRegionTop != bottomRegionTop;
+      oldDelegate.bottomRegionTop != bottomRegionTop ||
+      oldDelegate.spineX != spineX ||
+      oldDelegate.bandCount != bandCount ||
+      oldDelegate.bandCoverage != bandCoverage ||
+      oldDelegate.bandCollected != bandCollected;
 }
