@@ -63,10 +63,8 @@ class _ScanScreenState extends State<ScanScreen> {
   static const double _stitchSimThreshold = 0.80;
   // 명령 3 스티칭: 겹침 앵커를 탐색할 윈도우 크기(줄 수).
   static const int _stitchWindow = 14;
-  // 명령 3: 좌우 2페이지를 가르는 책등(중심선) 가로 위치(정규화 0~1)의 기본값·범위.
+  // 명령 3: 좌우 2페이지를 가르는 책등(중심선) 가로 위치(정규화 0~1)의 기본값.
   static const double _spineXDefault = 0.5;
-  static const double _spineMin = 0.30;
-  static const double _spineMax = 0.70;
   // 슬라이스 1: 페이지 저장소(재독·누락 감지) 파라미터.
   static const int _fingerprintLineCount = 3; // 좌/우 각 상단에서 지문에 쓸 줄 수
   static const double _rereadSimThreshold = 0.6; // 재독으로 볼 지문 유사도(0~1)
@@ -98,6 +96,8 @@ class _ScanScreenState extends State<ScanScreen> {
   double _minZoomLevel = 1.0;
   double _maxZoomLevel = 1.0;
   double _currentZoomLevel = 1.0;
+  // 핀치 줌 제스처 시작 시점의 배율 — 제스처 도중 이 값에 손가락 간격 배율을 곱한다.
+  double _zoomGestureBaseLevel = 1.0;
 
   bool _debugPanelEnabled = false;
   bool _handDetectionBusy = false;
@@ -109,7 +109,6 @@ class _ScanScreenState extends State<ScanScreen> {
   Rect? _bookBox;
 
   _CaptureStatus _captureStatus = _CaptureStatus.idle;
-  String? _lastOcrSummary;
 
   // 손 래치: 한 번 검출된 손은 검출이 끊겨도 일정 조건까지 '있음'으로 유지한다.
   bool _handLatched = false;
@@ -118,10 +117,16 @@ class _ScanScreenState extends State<ScanScreen> {
   double _lastHandArea = 0;
   double _peakHandArea = 0;
 
-  // 명령 3: 책등 가로 위치(좌우 페이지 분리선). 캡처 시 자동 감지로 갱신되며,
-  // 디버그 슬라이더를 건드리면 수동 모드로 전환돼 자동 갱신이 멈춘다.
+  // 명령 3: 책등 가로 위치(좌우 페이지 분리선). 캡처 시 자동 감지로 갱신된다.
   double _spineX = _spineXDefault;
-  bool _spineManualOverride = false;
+
+  // 디버그: 페이지 갱신 표시 문구(예: "페이지 업데이트됨 (15P, 16P)").
+  // 표시 1초 뒤 _pageUpdateTimer가 자동으로 지운다.
+  String? _pageUpdateInfo;
+  Timer? _pageUpdateTimer;
+
+  // 상단 표시용 — 방금 인식된 페이지(말 그대로 '현재' 페이지, 최댓값 아님).
+  int _currentRecognizedPage = 0;
 
   // 슬라이스 2: 8칸(4행×2열) 셀별 수집 상태. 인덱스 = 행*2 + 열(0=좌, 1=우).
   // null이면 미수집, 비-null이면 그 칸의 OCR 줄(빈 리스트일 수 있음).
@@ -140,7 +145,9 @@ class _ScanScreenState extends State<ScanScreen> {
   final List<_StoredPage> _pageStore = [];
   // 러닝 헤더 감지용: 페이지 상단에 반복 인쇄되는 줄의 출현 페이지 수.
   final Map<String, int> _topLineFrequency = {};
-  // 직전에 저장(또는 재독으로 확인)된 펼침면의 오른쪽 페이지 번호 — 다음 기대값 계산용.
+  // 페이지 번호 앵커 — 지금까지 확정된 오른쪽 페이지 번호의 최댓값(읽기 진행 위치).
+  // 다음 펼침면의 기대값(anchor+1·anchor+2) 계산에 쓴다. 뒤로 돌아간 곁다리는
+  // _advanceAnchor의 max 갱신으로 앵커를 끌어내리지 않는다.
   int? _lastCommittedRight;
 
   @override
@@ -158,8 +165,18 @@ class _ScanScreenState extends State<ScanScreen> {
   @override
   void dispose() {
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    _pageUpdateTimer?.cancel();
     _controller?.dispose();
     super.dispose();
+  }
+
+  // 디버그: 페이지 갱신 문구를 띄우고 1초 뒤 자동으로 지운다.
+  void _flashPageUpdate(String text) {
+    _pageUpdateTimer?.cancel();
+    if (mounted) setState(() => _pageUpdateInfo = text);
+    _pageUpdateTimer = Timer(const Duration(seconds: 1), () {
+      if (mounted) setState(() => _pageUpdateInfo = null);
+    });
   }
 
   // --- 카메라 제어 로직 ---
@@ -173,6 +190,18 @@ class _ScanScreenState extends State<ScanScreen> {
         enableAudio: false,
       );
       await _controller!.initialize();
+
+      // 카메라 프리뷰/촬영 방향을 가로로 고정한다.
+      // SystemChrome.setPreferredOrientations만으로는 UI만 가로로 돌고
+      // 카메라는 기기 센서 방향을 따라가, 폰을 세로로 들면 프리뷰가 틀어진다.
+      // lockCaptureOrientation은 물리적 기기 방향과 무관하게 가로로 잠근다.
+      try {
+        await _controller!.lockCaptureOrientation(
+          DeviceOrientation.landscapeLeft,
+        );
+      } catch (e) {
+        debugPrint("카메라 방향 고정 실패: $e");
+      }
 
       _minZoomLevel = await _controller!.getMinZoomLevel();
       _maxZoomLevel = await _controller!.getMaxZoomLevel();
@@ -193,6 +222,16 @@ class _ScanScreenState extends State<ScanScreen> {
     } catch (e) {
       debugPrint("줌 설정 에러: $e");
     }
+  }
+
+  // 핀치 줌 시작 — 현재 배율을 기준값으로 잡는다.
+  void _onZoomGestureStart() {
+    _zoomGestureBaseLevel = _currentZoomLevel;
+  }
+
+  // 핀치 줌 진행 — 기준 배율에 두 손가락 간격 배율을 곱해 적용한다.
+  void _onZoomGestureUpdate(double scale) {
+    _updateZoom(_zoomGestureBaseLevel * scale);
   }
 
   // --- 파일 시스템 로직 (로직 고도화 반영) ---
@@ -380,7 +419,6 @@ class _ScanScreenState extends State<ScanScreen> {
       _handResultAt = null;
       _bookBox = null;
       _captureStatus = _CaptureStatus.motion;
-      _lastOcrSummary = null;
       _lastOcrFullText = null;
       _handLatched = false;
       _lastHandBox = null;
@@ -394,11 +432,6 @@ class _ScanScreenState extends State<ScanScreen> {
     await _detectBookBoxOnce();
 
     await _ensureImageStreamRunning();
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text("자동 촬영을 시작합니다.")));
   }
 
   // 촬영 시작 시 사진 한 장으로 책 테두리 박스를 1회 검출해 세션 내내 고정한다.
@@ -410,13 +443,7 @@ class _ScanScreenState extends State<ScanScreen> {
       if (!mounted) return;
       setState(() => _bookBox = box);
       if (box == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              "책 테두리를 찾지 못했어요. 책과 주변 배경이 함께 보이게 두고 다시 시작해 주세요.",
-            ),
-          ),
-        );
+        debugPrint("책 테두리를 찾지 못했습니다.");
       } else {
         debugPrint("책 테두리 박스 검출 완료: $box");
       }
@@ -453,12 +480,8 @@ class _ScanScreenState extends State<ScanScreen> {
         leftLines = await _ocrLines(bytes);
         rightLines = const [];
       } else {
-        if (!_spineManualOverride) {
-          final detected = _detectSpineX(oriented);
-          if (detected != null && mounted) {
-            setState(() => _spineX = detected.clamp(_spineMin, _spineMax));
-          }
-        }
+        final detected = _detectSpineX(oriented, _captureBox);
+        if (mounted) setState(() => _spineX = detected);
         // 슬라이스 1: 크롭을 책 박스 기준으로.
         final box = _captureBox;
         final spine = _spineX.clamp(box.left, box.right);
@@ -553,11 +576,6 @@ class _ScanScreenState extends State<ScanScreen> {
       _peakHandArea = 0;
       _resetBandCollection();
     });
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("자동 촬영을 멈췄습니다. 분석을 눌러 결과를 반영하세요.")),
-    );
   }
 
   Future<void> _ensureImageStreamRunning() async {
@@ -843,20 +861,6 @@ class _ScanScreenState extends State<ScanScreen> {
     return false;
   }
 
-  // 명령 3: 디버그 패널 슬라이더에서 책등 위치를 수동 보정한다(수동 모드 전환).
-  void _updateSpineX(double value) {
-    if (!mounted) return;
-    setState(() {
-      _spineX = value.clamp(_spineMin, _spineMax);
-      _spineManualOverride = true;
-    });
-  }
-
-  // 명령 3: 책등 위치를 자동 감지 모드로 되돌린다(다음 캡처에서 다시 감지).
-  void _resetSpineAuto() {
-    if (!mounted) return;
-    setState(() => _spineManualOverride = false);
-  }
 
   // 슬라이스 1: 띠·크롭의 기준 사각형 — 검출된 책 박스(미검출이면 프레임 전체).
   Rect get _captureBox => _bookBox ?? const Rect.fromLTRB(0, 0, 1, 1);
@@ -962,12 +966,10 @@ class _ScanScreenState extends State<ScanScreen> {
         return;
       }
 
-      // 첫 수집 캡처에서 책등 위치를 자동 감지한다(수동 보정 중이면 건너뜀).
-      if (!_spineManualOverride && _cellLines.every((c) => c == null)) {
-        final detected = _detectSpineX(oriented);
-        if (detected != null && mounted) {
-          setState(() => _spineX = detected.clamp(_spineMin, _spineMax));
-        }
+      // 첫 수집 캡처에서 책등 위치를 자동 감지한다.
+      if (_cellLines.every((c) => c == null)) {
+        final detected = _detectSpineX(oriented, _captureBox);
+        if (mounted) setState(() => _spineX = detected);
       }
 
       final box = _captureBox;
@@ -999,13 +1001,6 @@ class _ScanScreenState extends State<ScanScreen> {
             _rereadSimThreshold) {
           debugPrint("슬라이스 2: 수집 중 페이지 넘김 감지 — 칸 버퍼 리셋.");
           _resetBandCollection();
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text("수집 중 페이지 넘김 감지 — 새 페이지로 다시 시작"),
-              ),
-            );
-          }
         }
       }
 
@@ -1069,22 +1064,28 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // 명령 3: 펼친 책의 책등(좌우 페이지 사이 골) 가로 위치를 자동 감지한다.
-  // 책등은 글자가 없어 가로 명암 변화(텍스처)가 가장 적은 세로 컬럼이다.
-  // 가로 중앙 30~70% 구간에서 텍스처가 최소인 컬럼을 찾는다. 실패 시 null.
-  double? _detectSpineX(img.Image src) {
+  // 책 박스 정중앙을 기준으로 ±20%(박스 너비 대비) 창 안에서만, 텍스처(가로
+  // 명암 변화)가 가장 적은 세로 컬럼을 책등으로 본다. 창을 좁혀, 텍스트 가장자리
+  // 등 엉뚱한 위치로 오검출되는 일을 막는다. 항상 박스 안 값을 돌려준다(실패 시 중앙).
+  double _detectSpineX(img.Image src, Rect box) {
+    // 박스 정중앙 — 검출 실패 시 이 값을 그대로 책등으로 쓴다.
+    final center = (box.left + box.right) / 2;
     // 스캔을 가볍게 하려고 폭 480으로 축소한다.
     final small = src.width > 480 ? img.copyResize(src, width: 480) : src;
     final w = small.width;
     final h = small.height;
-    if (w < 20 || h < 20) return null;
-    // 세로 중앙 25~75% 행, 가로 중앙 30~70% 열만 본다(머리/꼬리·바깥여백 제외).
-    final yStart = (h * 0.25).round();
-    final yEnd = (h * 0.75).round();
-    final xStart = (w * 0.30).round();
-    final xEnd = (w * 0.70).round();
-    if (xStart < 1 || xEnd > w || xEnd - xStart < 3 || yEnd - yStart < 3) {
-      return null;
-    }
+    if (w < 20 || h < 20) return center;
+    // 가로: 박스 중앙 ±20%(박스 너비) 창. 세로: 박스 중앙 25~75% 행.
+    final halfWin = 0.20 * box.width;
+    final xStart = ((center - halfWin) * w).round().clamp(1, w - 1);
+    final xEnd = ((center + halfWin) * w).round().clamp(xStart + 1, w);
+    final yStart = ((box.top + box.height * 0.25) * h)
+        .round()
+        .clamp(0, h - 1);
+    final yEnd = ((box.top + box.height * 0.75) * h)
+        .round()
+        .clamp(yStart + 1, h);
+    if (xEnd - xStart < 3 || yEnd - yStart < 3) return center;
 
     // 컬럼별 가로 명암 변화량 합 — 글자 컬럼은 크고, 책등 골은 작다.
     final energy = List<double>.filled(xEnd - xStart, 0);
@@ -1120,7 +1121,7 @@ class _ScanScreenState extends State<ScanScreen> {
         bestIdx = i;
       }
     }
-    if (bestIdx < 0) return null;
+    if (bestIdx < 0) return center;
     return (xStart + bestIdx) / w;
   }
 
@@ -1307,7 +1308,6 @@ class _ScanScreenState extends State<ScanScreen> {
 
     final fingerprint = _buildFingerprintLines(leftLines, rightLines);
     final quality = _pageQuality(pageText);
-    final warn = stitchFailed ? " · 스티칭 경고" : "";
 
     // 재독 검사: 지금까지 저장된 모든 페이지의 상단 지문과 비교한다.
     _StoredPage? matched;
@@ -1333,7 +1333,7 @@ class _ScanScreenState extends State<ScanScreen> {
         hit.rightText = rightText;
         hit.quality = quality;
       }
-      _lastCommittedRight = hit.rightNumber;
+      _advanceAnchor(hit.rightNumber);
       debugPrint(
         "명령 3: 재독으로 판단 — 기존 ${hit.rightNumber}P 유지"
         "(유사도 ${bestSim.toStringAsFixed(2)}).",
@@ -1347,39 +1347,18 @@ class _ScanScreenState extends State<ScanScreen> {
       if (mounted) {
         setState(() {
           _lastOcrFullText = pageText;
-          _lastOcrSummary = _summaryOf(pageText);
+          _currentRecognizedPage = hit.rightNumber;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("이미 읽은 페이지로 인식 — ${hit.rightNumber}P, 재저장 안 함$warn"),
-          ),
-        );
+        _flashPageUpdate("중복 페이지 - OCR 수행X");
       }
       return;
     }
 
-    // 새 페이지 — 좌/우 하단에서 페이지 번호를 각각 추출한다(B안).
-    final expectedLeft = _lastCommittedRight == null
-        ? null
-        : _lastCommittedRight! + 1;
-    int? leftNumber = _extractBottomPageNumber(leftLines);
-    int? rightNumber = _extractBottomPageNumber(rightLines);
-    final numberConfirmed = leftNumber != null || rightNumber != null;
-    // 펼침면의 좌·우 페이지 번호는 연속이어야 한다(left = right - 1).
-    // 둘 다 잡혔는데 인접하지 않으면 한쪽이 장·절 번호 등을 오인식한 것 —
-    // 더 큰 값을 실제 페이지로 보고, 그 값이 나온 쪽 기준으로 다른 쪽을 보정한다.
-    if (leftNumber != null &&
-        rightNumber != null &&
-        rightNumber != leftNumber + 1) {
-      if (leftNumber >= rightNumber) {
-        rightNumber = leftNumber + 1;
-      } else {
-        leftNumber = rightNumber - 1;
-      }
-    }
-    // 한쪽만 잡혔으면 다른 쪽을 인접 번호로 역산한다.
-    leftNumber ??= rightNumber != null ? rightNumber - 1 : (expectedLeft ?? 1);
-    rightNumber ??= leftNumber + 1;
+    // 새 페이지 — 좌·우 연속성 + 앵커 + 혼동쌍으로 페이지 번호를 확정한다.
+    final resolved = _resolvePageNumbers(leftLines, rightLines);
+    final leftNumber = resolved.left;
+    final rightNumber = resolved.right;
+    final numberConfirmed = resolved.confirmed;
 
     final page = _StoredPage(
       leftNumber: leftNumber,
@@ -1392,7 +1371,7 @@ class _ScanScreenState extends State<ScanScreen> {
     );
     _pageStore.add(page);
     _registerTopLines(fingerprint);
-    _lastCommittedRight = rightNumber;
+    _advanceAnchor(rightNumber);
     if (mounted) {
       AppStateScope.of(
         context,
@@ -1404,17 +1383,9 @@ class _ScanScreenState extends State<ScanScreen> {
     if (mounted) {
       setState(() {
         _lastOcrFullText = pageText;
-        _lastOcrSummary = _summaryOf(pageText);
+        _currentRecognizedPage = rightNumber;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            numberConfirmed
-                ? "새 페이지 저장 — $leftNumber·${rightNumber}P$warn"
-                : "새 페이지 저장 — 번호 미확정(추정 $leftNumber·${rightNumber}P)$warn",
-          ),
-        ),
-      );
+      _flashPageUpdate("페이지 업데이트됨 (${leftNumber}P, ${rightNumber}P)");
     }
   }
 
@@ -1440,7 +1411,7 @@ class _ScanScreenState extends State<ScanScreen> {
   // 슬라이스 1(페이지 확인 우선): 상단 탐침에서 재독으로 판정된 경우 —
   // 본문 전체 OCR을 건너뛰고 기존 페이지를 그대로 유지한다.
   void _handleProbeReread(_StoredPage hit) {
-    _lastCommittedRight = hit.rightNumber;
+    _advanceAnchor(hit.rightNumber);
     debugPrint(
       "페이지 확인: 상단 탐침에서 재독 감지 — 기존 ${hit.rightNumber}P, 본문 OCR 생략.",
     );
@@ -1450,13 +1421,9 @@ class _ScanScreenState extends State<ScanScreen> {
       ).updateBookCurrentPage(widget.bookId, hit.rightNumber);
       setState(() {
         _lastOcrFullText = hit.text;
-        _lastOcrSummary = _summaryOf(hit.text);
+        _currentRecognizedPage = hit.rightNumber;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("이미 읽은 페이지 — ${hit.rightNumber}P, 본문 OCR 생략"),
-        ),
-      );
+      _flashPageUpdate("중복 페이지 - OCR 수행X");
     }
   }
 
@@ -1472,7 +1439,7 @@ class _ScanScreenState extends State<ScanScreen> {
     if (hit == null) return;
 
     debugPrint("명령 3: 조기 재독 감지 — 기존 ${hit.rightNumber}P, 띠 수집 중단.");
-    _lastCommittedRight = hit.rightNumber;
+    _advanceAnchor(hit.rightNumber);
     _resetBandCollection();
     _awaitingMotionBeforeNextCapture = true;
     _stableSince = null;
@@ -1482,13 +1449,9 @@ class _ScanScreenState extends State<ScanScreen> {
       ).updateBookCurrentPage(widget.bookId, hit.rightNumber);
       setState(() {
         _lastOcrFullText = hit.text;
-        _lastOcrSummary = _summaryOf(hit.text);
+        _currentRecognizedPage = hit.rightNumber;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("이미 읽은 페이지 — ${hit.rightNumber}P, 조기 감지로 건너뜀"),
-        ),
-      );
+      _flashPageUpdate("중복 페이지 - OCR 수행X");
     }
   }
 
@@ -1563,6 +1526,140 @@ class _ScanScreenState extends State<ScanScreen> {
       }
     }
     return best;
+  }
+
+  // ── 페이지 번호 확정 ──────────────────────────────────────────────
+  // 단일 OCR 한 번을 그대로 믿지 않고, 좌·우 쌍의 연속성·앵커(최근 추세)·
+  // 숫자 혼동쌍이 서로 검산하게 해서 페이지 번호를 정한다.
+
+  // 앵커와 '근방'으로 볼 페이지 번호 허용 오차.
+  static const int _pageAnchorTolerance = 3;
+
+  // OCR이 인쇄체에서 자주 헷갈리는 숫자 쌍 — 한쪽이 다른 쪽으로 오인될 수 있다.
+  static const Map<int, List<int>> _digitConfusions = {
+    0: [6, 8],
+    1: [4, 7],
+    3: [8, 9],
+    4: [1, 9],
+    5: [6, 8],
+    6: [0, 5, 8],
+    7: [1, 9],
+    8: [0, 3, 5, 6],
+    9: [3, 4, 7],
+  };
+
+  bool _digitsConfusable(int a, int b) {
+    if (a == b) return true;
+    return (_digitConfusions[a]?.contains(b) ?? false) ||
+        (_digitConfusions[b]?.contains(a) ?? false);
+  }
+
+  // [got]이 [expected]의 OCR 오인인가 — 자릿수가 같고 모든 자리가 같거나 혼동쌍.
+  bool _isConfusionMisread(int expected, int got) {
+    if (expected == got || expected < 0 || got < 0) return false;
+    final e = expected.toString();
+    final g = got.toString();
+    if (e.length != g.length) return false;
+    bool anyDiff = false;
+    for (int i = 0; i < e.length; i++) {
+      final ed = int.parse(e[i]);
+      final gd = int.parse(g[i]);
+      if (ed != gd) anyDiff = true;
+      if (!_digitsConfusable(ed, gd)) return false;
+    }
+    return anyDiff;
+  }
+
+  // 두 페이지 번호가 '근방'(앵커 허용 오차 이내)인가.
+  bool _pageNear(int a, int b) => (a - b).abs() <= _pageAnchorTolerance;
+
+  // 앵커(_lastCommittedRight)를 전진시킨다 — 뒤로 돌아간 곁다리가 앵커를
+  // 끌어내리지 않도록 max로만 갱신한다.
+  void _advanceAnchor(int right) {
+    _lastCommittedRight = _lastCommittedRight == null
+        ? right
+        : math.max(_lastCommittedRight!, right);
+  }
+
+  // 한 펼침면의 좌·우 페이지 번호를 확정한다. confirmed=false면 추정/폴백이다.
+  ({int left, int right, bool confirmed}) _resolvePageNumbers(
+    List<_VisionLine> leftLines,
+    List<_VisionLine> rightLines,
+  ) {
+    final rawLeft = _extractBottomPageNumber(leftLines);
+    final rawRight = _extractBottomPageNumber(rightLines);
+    final anchor = _lastCommittedRight;
+
+    // 앵커 없음(첫 페이지) — OCR을 그대로 신뢰한다.
+    if (anchor == null) {
+      if (rawLeft != null && rawRight != null) {
+        if (rawRight == rawLeft + 1) {
+          return (left: rawLeft, right: rawRight, confirmed: true);
+        }
+        return (left: rawRight - 1, right: rawRight, confirmed: true);
+      }
+      if (rawRight != null) {
+        return (left: rawRight - 1, right: rawRight, confirmed: true);
+      }
+      if (rawLeft != null) {
+        return (left: rawLeft, right: rawLeft + 1, confirmed: true);
+      }
+      return (left: 1, right: 2, confirmed: false);
+    }
+
+    final expectedLeft = anchor + 1;
+    final expectedRight = anchor + 2;
+
+    // 둘 다 못 읽음 → 기대값 폴백.
+    if (rawLeft == null && rawRight == null) {
+      return (left: expectedLeft, right: expectedRight, confirmed: false);
+    }
+
+    // 한쪽만 읽음 → 그 값과 기대값을 교차검증한다.
+    if (rawLeft == null || rawRight == null) {
+      final isLeft = rawLeft != null;
+      final raw = rawLeft ?? rawRight!;
+      final expectedForThis = isLeft ? expectedLeft : expectedRight;
+      if (_pageNear(raw, expectedForThis)) {
+        final l = isLeft ? raw : raw - 1;
+        return (left: l, right: l + 1, confirmed: true);
+      }
+      if (_isConfusionMisread(expectedForThis, raw)) {
+        // 시프트 오인 → 기대값으로 교정.
+        return (left: expectedLeft, right: expectedRight, confirmed: false);
+      }
+      // 진짜 점프 후보지만 단일 번호라 약함 — 그 값을 쓰되 미확정으로 둔다.
+      final l = isLeft ? raw : raw - 1;
+      return (left: l, right: l + 1, confirmed: false);
+    }
+
+    // 둘 다 읽음.
+    final consecutive = rawRight == rawLeft + 1;
+    if (consecutive) {
+      if (_pageNear(rawRight, expectedRight)) {
+        // 연속 + 기대값 근방 → 최상 신뢰.
+        return (left: rawLeft, right: rawRight, confirmed: true);
+      }
+      // 연속인데 기대값과 멂 — 좌·우 모두 혼동쌍 거리면 펼침면 전체 시프트 오인.
+      if (_isConfusionMisread(expectedLeft, rawLeft) &&
+          _isConfusionMisread(expectedRight, rawRight)) {
+        return (left: expectedLeft, right: expectedRight, confirmed: false);
+      }
+      // 혼동쌍이 아님 → 깨끗한 연속 쌍 → 진짜 점프로 보고 신뢰(앵커 재설정).
+      return (left: rawLeft, right: rawRight, confirmed: true);
+    }
+
+    // 비연속 — 최소 한쪽 오류. 기대값과 맞는 쪽을 채택하고 나머지를 유도한다.
+    final leftMatches = _pageNear(rawLeft, expectedLeft);
+    final rightMatches = _pageNear(rawRight, expectedRight);
+    if (leftMatches && !rightMatches) {
+      return (left: rawLeft, right: rawLeft + 1, confirmed: true);
+    }
+    if (rightMatches && !leftMatches) {
+      return (left: rawRight - 1, right: rawRight, confirmed: true);
+    }
+    // 둘 다 안 맞음(또는 둘 다 맞지만 비연속 — 모순) → 기대값 폴백 + 미확정.
+    return (left: expectedLeft, right: expectedRight, confirmed: false);
   }
 
   // 슬라이스 1: 페이지 OCR 품질 점수 — 재독 시 더 선명한 사본으로 교체할지 판단.
@@ -1733,16 +1830,6 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
-  // 임의 텍스트의 디버그 패널 요약(글자수·줄수·미리보기).
-  String _summaryOf(String text) {
-    final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
-    final lineCount = text.split('\n').where((l) => l.trim().isNotEmpty).length;
-    final preview = normalized.length > 70
-        ? '${normalized.substring(0, 70)}…'
-        : normalized;
-    return '${normalized.length}자 · $lineCount줄\n$preview';
-  }
-
   // 디버그: 마지막 OCR/조립 전체 텍스트를 스크롤 다이얼로그로 보여준다.
   void _showFullOcrDialog() {
     final text = _lastOcrFullText;
@@ -1903,12 +1990,6 @@ class _ScanScreenState extends State<ScanScreen> {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("✅ 데이터 통합 업데이트가 완료되었습니다."),
-            backgroundColor: Colors.green,
-          ),
-        );
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
             builder: (_) => BookDetailScreen(bookId: widget.bookId),
@@ -1917,11 +1998,6 @@ class _ScanScreenState extends State<ScanScreen> {
       }
     } catch (e) {
       debugPrint("❌ 업데이트 실패: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text("업데이트 실패: $e")));
-      }
     } finally {
       if (mounted) setState(() => _isProcessingAnalysis = false);
     }
@@ -2052,8 +2128,8 @@ $fullText
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    final book = AppStateScope.of(context).findBookById(widget.bookId);
-    final currentPage = book?.currentPage ?? 0;
+    // 상단 표시는 '방금 인식된' 페이지 — 분석 기록의 최댓값과 별개.
+    final currentPage = _currentRecognizedPage;
 
     return Scaffold(
       backgroundColor: const Color(0xFFFDFBF7),
@@ -2121,6 +2197,8 @@ $fullText
                 controller: _controller!,
                 currentZoomLevel: _currentZoomLevel,
                 onZoomChanged: _updateZoom,
+                onZoomGestureStart: _onZoomGestureStart,
+                onZoomGestureUpdate: _onZoomGestureUpdate,
                 isCapturing: _isAutoMode,
                 isProcessing: _isProcessingAnalysis,
                 onAnalyzePressed: _performAnalysis,
@@ -2130,18 +2208,15 @@ $fullText
                 handResult: _handResult,
                 bookBox: _bookBox,
                 captureStatusLabel: _captureStatusLabel,
-                ocrSummary: _lastOcrSummary,
                 handLatched: _handLatched,
                 trackedHandBox: _trackedHandBox,
                 handCoversText: _handLatched && _handCoversText(),
                 spineX: _spineX,
-                spineManualOverride: _spineManualOverride,
-                onSpineChanged: _updateSpineX,
-                onSpineAutoReset: _resetSpineAuto,
                 cellCoverage: _cellCoverage(),
                 cellCollected: _cellCollectedView(),
                 textRegionInset: _textRegionInset,
                 onShowFullOcr: _showFullOcrDialog,
+                pageUpdateLabel: _pageUpdateInfo,
               ),
             ),
           ],

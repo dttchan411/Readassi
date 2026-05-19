@@ -7,6 +7,10 @@ class ScanCameraView extends StatelessWidget {
   final CameraController controller;
   final double currentZoomLevel;
   final Function(double) onZoomChanged;
+  // 핀치 줌 — 제스처 시작 시 1회 호출(기준 배율 기록용),
+  // 제스처 도중 손가락 간격 배율(details.scale)을 전달한다.
+  final VoidCallback? onZoomGestureStart;
+  final ValueChanged<double>? onZoomGestureUpdate;
   final bool isCapturing;
   final bool isProcessing;
   final VoidCallback onAnalyzePressed;
@@ -16,25 +20,25 @@ class ScanCameraView extends StatelessWidget {
   final HandDetectionResult? handResult;
   final Rect? bookBox;
   final String captureStatusLabel;
-  final String? ocrSummary;
   final bool handLatched;
   final HandBox? trackedHandBox;
   final bool handCoversText;
   final double spineX;
-  final bool spineManualOverride;
-  final ValueChanged<double>? onSpineChanged;
-  final VoidCallback? onSpineAutoReset;
   final List<bool> cellCoverage;
   final List<bool> cellCollected;
   // 책 박스에서 이 비율만큼 안으로 들인 영역이 '본문' — 바깥은 무시 테두리.
   final double textRegionInset;
   final VoidCallback? onShowFullOcr;
+  // 디버그: 페이지가 갱신될 때 표시할 문구(예: "페이지 업데이트됨 (15P, 16P)").
+  final String? pageUpdateLabel;
 
   const ScanCameraView({
     super.key,
     required this.controller,
     required this.currentZoomLevel,
     required this.onZoomChanged,
+    this.onZoomGestureStart,
+    this.onZoomGestureUpdate,
     required this.isCapturing,
     required this.isProcessing,
     required this.onAnalyzePressed,
@@ -44,18 +48,15 @@ class ScanCameraView extends StatelessWidget {
     this.handResult,
     this.bookBox,
     this.captureStatusLabel = '대기 중',
-    this.ocrSummary,
     this.handLatched = false,
     this.trackedHandBox,
     this.handCoversText = false,
     this.spineX = 0.5,
-    this.spineManualOverride = false,
-    this.onSpineChanged,
-    this.onSpineAutoReset,
     this.cellCoverage = const [],
     this.cellCollected = const [],
     this.textRegionInset = 0.10,
     this.onShowFullOcr,
+    this.pageUpdateLabel,
   });
 
   @override
@@ -67,8 +68,9 @@ class ScanCameraView extends StatelessWidget {
           child: AspectRatio(
             aspectRatio: controller.value.aspectRatio,
             child: GestureDetector(
-              onScaleStart: (details) {},
-              onScaleUpdate: (details) {},
+              onScaleStart: (details) => onZoomGestureStart?.call(),
+              onScaleUpdate: (details) =>
+                  onZoomGestureUpdate?.call(details.scale),
               child: Stack(
                 fit: StackFit.expand,
                 children: [
@@ -310,12 +312,6 @@ class ScanCameraView extends StatelessWidget {
       );
     }
 
-    final ocr = ocrSummary;
-    if (ocr != null) {
-      lines.add(_debugLine("최근 OCR 결과", const Color(0xFF82B1FF)));
-      lines.add(_debugLine(ocr, Colors.white70));
-    }
-
     if (onShowFullOcr != null) {
       lines.add(
         Padding(
@@ -345,56 +341,9 @@ class ScanCameraView extends StatelessWidget {
       );
     }
 
-    final onSpine = onSpineChanged;
-    if (onSpine != null) {
-      lines.add(
-        _debugLine(
-          "책등 위치(명령 3): ${(spineX * 100).round()}%  "
-              "(${spineManualOverride ? '수동 보정' : '자동 감지'})",
-          const Color(0xFFE040FB),
-        ),
-      );
-      lines.add(
-        SizedBox(
-          width: 250,
-          child: Slider(
-            value: spineX.clamp(0.30, 0.70),
-            min: 0.30,
-            max: 0.70,
-            activeColor: const Color(0xFFE040FB),
-            inactiveColor: Colors.white24,
-            onChanged: onSpine,
-          ),
-        ),
-      );
-      if (spineManualOverride && onSpineAutoReset != null) {
-        lines.add(
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: GestureDetector(
-              onTap: onSpineAutoReset,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF7B1FA2),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  "책등 자동 감지로 되돌리기",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      }
+    // 페이지 갱신 표시 — 'OCR 결과 전체보기' 아래. 1초 뒤 사라진다(부모가 제어).
+    if (pageUpdateLabel != null) {
+      lines.add(_debugLine(pageUpdateLabel!, const Color(0xFF69F0AE)));
     }
 
     return Container(

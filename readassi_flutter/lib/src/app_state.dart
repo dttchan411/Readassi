@@ -383,7 +383,11 @@ class AppState extends ChangeNotifier {
     final index = _books.indexWhere((book) => book.id == bookId);
     if (index != -1) {
       final oldBook = _books[index];
-      final int newPage = currentPage ?? oldBook.currentPage ?? 0;
+      // 마지막으로 읽은 페이지 = '가장 멀리 읽은' 페이지. 100쪽까지 읽다가
+      // 잠깐 30쪽을 확인해도(역행) 기록이 30으로 줄지 않도록 max로만 올린다.
+      final int incoming = currentPage ?? oldBook.currentPage ?? 0;
+      final int existing = oldBook.currentPage ?? 0;
+      final int newPage = incoming > existing ? incoming : existing;
       final int totalPages = oldBook.totalPages ?? 0;
 
       final updatedBook = Book(
