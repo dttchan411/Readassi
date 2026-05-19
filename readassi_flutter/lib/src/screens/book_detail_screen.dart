@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../app_state.dart';
 import '../models/book.dart';
-import '../services/claude_service.dart';
+import '../services/gemini_service.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/chat_bubble.dart';
 import 'character_profile_screen.dart';
@@ -21,12 +21,13 @@ class BookDetailScreen extends StatefulWidget {
 class _BookDetailScreenState extends State<BookDetailScreen> {
   BookDetailTab _activeTab = BookDetailTab.summary;
   final TextEditingController _controller = TextEditingController();
-  final ClaudeService _claudeService = ClaudeService();
+  final GeminiService _geminiService = GeminiService();
   bool _isSending = false;
   final List<_ChatMessage> _messages = [
     const _ChatMessage(
       role: ChatRole.assistant,
-      content: '안녕하세요. 이 책의 요약과 등장인물, 관계를 바탕으로 질문하실 수 있어요.',
+      content: '안녕하세요. 스캔·분석된 페이지 본문을 바탕으로 질문에 답하고, '
+          '근거가 있는 페이지 번호도 함께 알려드려요.',
     ),
   ];
 
@@ -326,7 +327,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       FilledButton(
                         onPressed: _isSending
                             ? null
-                            : () => _sendMessageWithClaude(book),
+                            : () => _sendQuestion(book),
                         style: FilledButton.styleFrom(
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(18),
@@ -345,7 +346,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     }
   }
 
-  Future<void> _sendMessageWithClaude(Book book) async {
+  Future<void> _sendQuestion(Book book) async {
     final text = _controller.text.trim();
     if (text.isEmpty) {
       return;
@@ -357,7 +358,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       _controller.clear();
     });
 
-    final answer = await _claudeService.answerBookQuestion(
+    final answer = await _geminiService.answerBookQuestion(
       book: book,
       question: text,
     );
@@ -368,12 +369,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
 
     setState(() {
       _messages.add(
-        _ChatMessage(
-          role: ChatRole.assistant,
-          content:
-              answer ??
-              'Claude API가 아직 연결되지 않았거나 응답을 받지 못했습니다. API를 연결하면 더 자연스러운 답변을 받을 수 있어요.',
-        ),
+        _ChatMessage(role: ChatRole.assistant, content: answer),
       );
       _isSending = false;
     });

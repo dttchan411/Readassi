@@ -194,7 +194,11 @@ class _ScanScreenState extends State<ScanScreen> {
       'pages': p.join(
         bookDir.path,
         '${widget.bookId}_pages.json',
-      ), // 슬라이스 1: 페이지 저장소(분석 후 삭제됨)
+      ), // 슬라이스 1: 작업용 페이지 저장소(분석 후 삭제됨)
+      'pagetext': p.join(
+        bookDir.path,
+        '${widget.bookId}_pagetext.json',
+      ), // 페이지 인용 Q&A용 영구 페이지 본문 저장소
       'story_db': p.join(
         bookDir.path,
         '${widget.bookId}_story_db.json',
@@ -1136,7 +1140,8 @@ class _ScanScreenState extends State<ScanScreen> {
       // 이미 읽은 페이지 — 새로 저장하지 않는다. 더 선명하면 본문만 교체한다.
       final hit = matched;
       if (quality > hit.quality) {
-        hit.text = pageText;
+        hit.leftText = leftText;
+        hit.rightText = rightText;
         hit.quality = quality;
       }
       _lastCommittedRight = hit.rightNumber;
@@ -1191,7 +1196,8 @@ class _ScanScreenState extends State<ScanScreen> {
       leftNumber: leftNumber,
       rightNumber: rightNumber,
       numberConfirmed: numberConfirmed,
-      text: pageText,
+      leftText: leftText,
+      rightText: rightText,
       topLines: fingerprint,
       quality: quality,
     );
@@ -1387,6 +1393,37 @@ class _ScanScreenState extends State<ScanScreen> {
       );
     } catch (e) {
       debugPrint("슬라이스 1: 페이지 저장소 저장 오류: $e");
+    }
+  }
+
+  // 페이지 인용 Q&A용 영구 페이지 본문 저장소(<bookId>_pagetext.json)에
+  // 이번 분석분의 페이지별 본문을 병합한다. 페이지 번호를 키로 하므로 같은
+  // 페이지를 다시 스캔하면 최신 본문으로 덮어쓴다. 분석 후에도 지우지 않는다.
+  Future<void> _mergePageTextStore() async {
+    if (_pageStore.isEmpty) return;
+    try {
+      final paths = await _getFilePaths();
+      final file = File(paths['pagetext']!);
+      final map = <String, dynamic>{};
+      if (await file.exists()) {
+        final raw = await file.readAsString();
+        if (raw.trim().isNotEmpty) {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map<String, dynamic>) map.addAll(decoded);
+        }
+      }
+      for (final page in _pageStore) {
+        if (page.leftText.trim().isNotEmpty) {
+          map['${page.leftNumber}'] = page.leftText;
+        }
+        if (page.rightText.trim().isNotEmpty) {
+          map['${page.rightNumber}'] = page.rightText;
+        }
+      }
+      await file.writeAsString(jsonEncode(map));
+      debugPrint("페이지 본문 저장소 병합 — 총 ${map.length}쪽.");
+    } catch (e) {
+      debugPrint("페이지 본문 저장소 병합 오류: $e");
     }
   }
 
@@ -1602,12 +1639,13 @@ class _ScanScreenState extends State<ScanScreen> {
         jsonEncode(result['internal_character_db']),
       );
 
-      // 4. ✅ 페이지 저장소 삭제 (토큰 비용 절감 및 최적화)
+      // 4. ✅ 페이지 본문을 영구 저장소에 병합한 뒤 작업용 저장소를 비운다.
+      await _mergePageTextStore();
       if (await pagesFile.exists()) await pagesFile.delete();
       _pageStore.clear();
       _topLineFrequency.clear();
       _lastCommittedRight = null;
-      debugPrint("🗑️ 분석 완료 후 페이지 저장소를 삭제하였습니다.");
+      debugPrint("🗑️ 분석 완료 — 페이지 본문 보관, 작업 저장소 삭제.");
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1865,7 +1903,8 @@ class _StoredPage {
     required this.leftNumber,
     required this.rightNumber,
     required this.numberConfirmed,
-    required this.text,
+    required this.leftText,
+    required this.rightText,
     required this.topLines,
     required this.quality,
   });
@@ -1873,15 +1912,21 @@ class _StoredPage {
   final int leftNumber;
   final int rightNumber;
   final bool numberConfirmed; // 페이지 번호를 OCR로 확정했는지(false=직전+N 추정)
-  String text; // 재독 시 더 선명한 사본으로 교체될 수 있음
+  String leftText; // 왼쪽 페이지 본문 — 재독 시 더 선명한 사본으로 교체될 수 있음
+  String rightText; // 오른쪽 페이지 본문 — 재독 시 교체될 수 있음
   final List<String> topLines; // 좌/우 상단 줄(정규화) — 재독 지문
   int quality; // OCR 품질 점수 — 재독 교체 판단
+
+  // 분석용 평문 — 좌·우 페이지 본문을 합친다.
+  String get text =>
+      [leftText, rightText].where((t) => t.trim().isNotEmpty).join('\n');
 
   Map<String, dynamic> toJson() => {
     'leftNumber': leftNumber,
     'rightNumber': rightNumber,
     'numberConfirmed': numberConfirmed,
-    'text': text,
+    'leftText': leftText,
+    'rightText': rightText,
     'topLines': topLines,
     'quality': quality,
   };
@@ -1890,7 +1935,8 @@ class _StoredPage {
     leftNumber: (json['leftNumber'] as num?)?.toInt() ?? 0,
     rightNumber: (json['rightNumber'] as num?)?.toInt() ?? 0,
     numberConfirmed: json['numberConfirmed'] as bool? ?? false,
-    text: json['text'] as String? ?? '',
+    leftText: json['leftText'] as String? ?? '',
+    rightText: json['rightText'] as String? ?? '',
     topLines: ((json['topLines'] as List?) ?? const [])
         .map((e) => e.toString())
         .toList(),
