@@ -26,6 +26,8 @@ class ScanCameraView extends StatelessWidget {
   final VoidCallback? onSpineAutoReset;
   final List<bool> cellCoverage;
   final List<bool> cellCollected;
+  // 책 박스에서 이 비율만큼 안으로 들인 영역이 '본문' — 바깥은 무시 테두리.
+  final double textRegionInset;
   final VoidCallback? onShowFullOcr;
 
   const ScanCameraView({
@@ -52,6 +54,7 @@ class ScanCameraView extends StatelessWidget {
     this.onSpineAutoReset,
     this.cellCoverage = const [],
     this.cellCollected = const [],
+    this.textRegionInset = 0.10,
     this.onShowFullOcr,
   });
 
@@ -79,6 +82,7 @@ class ScanCameraView extends StatelessWidget {
                       bookBox,
                       debugEnabled ? cellCoverage : const [],
                       debugEnabled ? cellCollected : const [],
+                      debugEnabled ? textRegionInset : 0.0,
                     ),
                   ),
                   if (debugEnabled)
@@ -460,12 +464,19 @@ class ScanCameraView extends StatelessWidget {
 /// 검출된 책 테두리 박스(정규화 Rect)와 그 안의 8칸 격자(4행 × 2열)를 그린다.
 /// 박스 기준으로 4개의 가로 분할선과 가운데 세로 분할선을 그리고,
 /// 디버그 모드에서는 각 칸의 수집/손가림 상태를 음영으로 표시한다.
+/// textRegionInset > 0이면 무시 테두리 영역(본문 영역 바깥)을 노란 음영으로 표시한다.
 class _BookBoxPainter extends CustomPainter {
-  _BookBoxPainter(this.bookBox, this.cellCoverage, this.cellCollected);
+  _BookBoxPainter(
+    this.bookBox,
+    this.cellCoverage,
+    this.cellCollected,
+    this.textRegionInset,
+  );
 
   final Rect? bookBox;
   final List<bool> cellCoverage;
   final List<bool> cellCollected;
+  final double textRegionInset;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -477,6 +488,37 @@ class _BookBoxPainter extends CustomPainter {
       box.right * size.width,
       box.bottom * size.height,
     );
+
+    // 무시 테두리 — 책 박스와 본문 영역 사이. 디버그 모드에서만 노란 음영.
+    if (textRegionInset > 0) {
+      final marginX = rect.width * textRegionInset;
+      final marginY = rect.height * textRegionInset;
+      final inner = Rect.fromLTRB(
+        rect.left + marginX,
+        rect.top + marginY,
+        rect.right - marginX,
+        rect.bottom - marginY,
+      );
+      // 박스 ∖ 본문영역 = 테두리. evenOdd로 두 사각형의 차집합을 칠한다.
+      final border = Path()
+        ..addRect(rect)
+        ..addRect(inner)
+        ..fillType = PathFillType.evenOdd;
+      canvas.drawPath(
+        border,
+        Paint()
+          ..color = const Color(0x33FFD54F)
+          ..style = PaintingStyle.fill,
+      );
+      // 본문 영역 경계선(노란 실선).
+      canvas.drawRect(
+        inner,
+        Paint()
+          ..color = const Color(0xCCFFD54F)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+    }
 
     // 8칸 음영 — 디버그 모드에서 cellCoverage/cellCollected가 채워졌을 때만.
     if (cellCoverage.isNotEmpty) {
@@ -531,7 +573,8 @@ class _BookBoxPainter extends CustomPainter {
   bool shouldRepaint(_BookBoxPainter oldDelegate) =>
       oldDelegate.bookBox != bookBox ||
       oldDelegate.cellCoverage != cellCoverage ||
-      oldDelegate.cellCollected != cellCollected;
+      oldDelegate.cellCollected != cellCollected ||
+      oldDelegate.textRegionInset != textRegionInset;
 }
 
 /// 디버그 오버레이를 카메라 프리뷰 위에 그린다.

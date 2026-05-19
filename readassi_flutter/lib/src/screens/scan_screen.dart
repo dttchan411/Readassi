@@ -2123,6 +2123,7 @@ $fullText
                 onSpineAutoReset: _resetSpineAuto,
                 cellCoverage: _cellCoverage(),
                 cellCollected: _cellCollectedView(),
+                textRegionInset: _textRegionInset,
                 onShowFullOcr: _showFullOcrDialog,
               ),
             ),
