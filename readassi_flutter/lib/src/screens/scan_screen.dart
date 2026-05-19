@@ -13,6 +13,8 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:image/image.dart' as img;
 
 import '../app_state.dart';
+import '../models/book.dart';
+import '../services/book_box_detection_service.dart';
 import '../services/claude_service.dart';
 import '../services/hand_detection_service.dart';
 import 'book_detail_screen.dart';
@@ -46,9 +48,10 @@ class _ScanScreenState extends State<ScanScreen> {
   static const Duration _handLatchTimeout = Duration(milliseconds: 2600);
   // 마지막 손 크기가 최대 크기 대비 이 비율 이하면 '빠져나가던 중'으로 본다.
   static const double _handExitShrinkRatio = 0.5;
-  // 하단 여백 경계 슬라이더의 허용 범위.
-  static const double _bottomRegionMin = 0.5;
-  static const double _bottomRegionMax = 0.95;
+  // ② 모서리 손 무시: 책 박스를 이 비율만큼 안으로 들인 영역을 '본문'으로 본다.
+  static const double _textRegionInset = 0.10;
+  // 손 박스 중 본문 영역과 겹치는 비율이 이 값 이상이면 '본문 가림'으로 본다.
+  static const double _handOverlapThreshold = 0.15;
   // 명령 3: 페이지를 가로 띠로 나눠, 손이 안 가린 띠만 모아 한 페이지를 조립한다.
   static const int _bandCount = 4;
   // 명령 3: 인접 캡처가 텍스트를 공유하도록 띠 구간 위아래에 두는 겹침 여유(정규화 높이).
@@ -70,11 +73,14 @@ class _ScanScreenState extends State<ScanScreen> {
   static const int _runningHeaderMinPages = 3; // 러닝 헤더로 볼 최소 출현 페이지 수
   static const int _pageNumberSearchLines = 6; // 하단 페이지번호를 찾을 줄 수
   static const int _pageNumberMaxTokens = 6; // 페이지번호 줄로 볼 최대 어절 수
+  // 페이지 확인용 상단 탐침 띠 높이(정규화) — 본문 전체 OCR 전 재독 판정에 쓴다.
+  static const double _probeStripHeight = 0.32;
 
   final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
   final ClaudeService _claudeService = ClaudeService();
   final HandDetectionService _handDetectionService = HandDetectionService();
+  final BookBoxDetectionService _bookBoxService = BookBoxDetectionService();
 
   bool _isAutoMode = false;
   bool _isImageStreamActive = false;
@@ -99,6 +105,9 @@ class _ScanScreenState extends State<ScanScreen> {
   HandDetectionResult? _handResult;
   DateTime? _handResultAt;
 
+  // 책 테두리 박스 — 촬영 시작 시 사진 1장으로 1회 검출(프리뷰 정규화 좌표).
+  Rect? _bookBox;
+
   _CaptureStatus _captureStatus = _CaptureStatus.idle;
   String? _lastOcrSummary;
 
@@ -109,10 +118,6 @@ class _ScanScreenState extends State<ScanScreen> {
   double _lastHandArea = 0;
   double _peakHandArea = 0;
 
-  // 손 위치 게이트: 손 박스가 이 높이 비율 아래(하단 여백)에 완전히 들어가
-  // 있으면 본문을 안 가린 것으로 보고 촬영을 허용한다. 디버그 패널 슬라이더로 조절.
-  double _bottomRegionTop = 0.80;
-
   // 명령 3: 책등 가로 위치(좌우 페이지 분리선). 캡처 시 자동 감지로 갱신되며,
   // 디버그 슬라이더를 건드리면 수동 모드로 전환돼 자동 갱신이 멈춘다.
   double _spineX = _spineXDefault;
@@ -121,6 +126,9 @@ class _ScanScreenState extends State<ScanScreen> {
   // 명령 3: 가로 띠별 수집 상태 + 캡처별 텍스트 세그먼트(겹침 스티칭 입력).
   final List<bool> _bandCollected = List<bool>.filled(_bandCount, false);
   final List<_BandSegment> _bandSegments = [];
+  // 슬라이스 2: 지금 띠 수집 중인 페이지의 상단 지문(페이지 ID). 수집 도중
+  // 이 지문이 크게 달라지면 페이지가 넘어간 것으로 보고 띠 버퍼를 리셋한다.
+  List<String>? _bandPageFingerprint;
   // 디버그 'OCR 결과 전체보기'용 — 마지막 OCR/조립 전체 텍스트.
   String? _lastOcrFullText;
 
@@ -199,14 +207,10 @@ class _ScanScreenState extends State<ScanScreen> {
         bookDir.path,
         '${widget.bookId}_pagetext.json',
       ), // 페이지 인용 Q&A용 영구 페이지 본문 저장소
-      'story_db': p.join(
+      'relmap': p.join(
         bookDir.path,
-        '${widget.bookId}_story_db.json',
-      ), // AI 내부 참고용 상세 줄거리 DB
-      'char_db': p.join(
-        bookDir.path,
-        '${widget.bookId}_char_db.json',
-      ), // AI 내부 참고용 상세 인물 DB
+        '${widget.bookId}_relmap.svg',
+      ), // 관계도 SVG (Claude 생성, 분석 시 갱신)
     };
   }
 
@@ -371,6 +375,7 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastHandDetectionAt = null;
       _handResult = null;
       _handResultAt = null;
+      _bookBox = null;
       _captureStatus = _CaptureStatus.motion;
       _lastOcrSummary = null;
       _lastOcrFullText = null;
@@ -382,12 +387,39 @@ class _ScanScreenState extends State<ScanScreen> {
       _resetBandCollection();
     });
 
+    // 촬영 시작 시 사진 한 장으로 책 테두리 박스를 1회 검출한다.
+    await _detectBookBoxOnce();
+
     await _ensureImageStreamRunning();
 
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text("자동 촬영을 시작합니다.")));
+  }
+
+  // 촬영 시작 시 사진 한 장으로 책 테두리 박스를 1회 검출해 세션 내내 고정한다.
+  Future<void> _detectBookBoxOnce() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    try {
+      final photo = await _controller!.takePicture();
+      final box = _bookBoxService.detect(photo.path);
+      if (!mounted) return;
+      setState(() => _bookBox = box);
+      if (box == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "책 테두리를 찾지 못했어요. 책과 주변 배경이 함께 보이게 두고 다시 시작해 주세요.",
+            ),
+          ),
+        );
+      } else {
+        debugPrint("책 테두리 박스 검출 완료: $box");
+      }
+    } catch (e) {
+      debugPrint("책 박스 검출 오류: $e");
+    }
   }
 
   Future<void> _captureSinglePage() async {
@@ -400,6 +432,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
     setState(() => _isCaptureBusy = true);
     try {
+      debugPrint("전체 페이지 촬영 시작 — 손 게이트 '깨끗' 판정.");
       final wasStreaming = _isImageStreamActive;
       if (wasStreaming) {
         await _stopImageStream();
@@ -423,6 +456,35 @@ class _ScanScreenState extends State<ScanScreen> {
             setState(() => _spineX = detected.clamp(_spineMin, _spineMax));
           }
         }
+        // 페이지 확인 우선(슬라이스 1): 상단 좁은 띠만 먼저 OCR해 재독인지 본다.
+        // 재독이면 본문 전체 OCR을 건너뛴다.
+        final probeLeft = await _ocrLines(
+          _cropEncode(oriented, 0.0, _probeStripHeight, 0.0, _spineX),
+        );
+        final probeRight = await _ocrLines(
+          _cropEncode(oriented, 0.0, _probeStripHeight, _spineX, 1.0),
+        );
+        final probeFingerprint = _buildFingerprintLines(probeLeft, probeRight);
+        final reread = _matchStoredPage(probeFingerprint);
+        debugPrint(
+          "페이지 확인: 상단 탐침 지문=$probeFingerprint → "
+          "${reread != null ? '재독(${reread.rightNumber}P)' : '새 페이지 후보'}.",
+        );
+        if (reread != null) {
+          _handleProbeReread(reread);
+          _resetBandCollection();
+          if (mounted && _isAutoMode) {
+            _lastCaptureAt = DateTime.now();
+            _awaitingMotionBeforeNextCapture = true;
+            _stableSince = null;
+          }
+          if (wasStreaming && _isAutoMode) {
+            await _ensureImageStreamRunning();
+          }
+          return;
+        }
+        // 새 페이지 — 본문 전체를 OCR한다.
+        _setCaptureStatus(_CaptureStatus.capturing);
         final leftCrop = _cropEncode(oriented, 0.0, 1.0, 0.0, _spineX);
         final rightCrop = _cropEncode(oriented, 0.0, 1.0, _spineX, 1.0);
         leftLines = await _ocrLines(leftCrop);
@@ -463,6 +525,7 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastHandDetectionAt = null;
       _handResult = null;
       _handResultAt = null;
+      _bookBox = null;
       _captureStatus = _CaptureStatus.idle;
       _handLatched = false;
       _lastHandBox = null;
@@ -563,6 +626,18 @@ class _ScanScreenState extends State<ScanScreen> {
       return;
     }
 
+    // ③ 2~3단계: 책 박스 맨 위 띠에 손이 있으면, 손이 내려갈 때까지 기다린다.
+    // 맨 위 띠가 페이지 식별(재독 판정) 기준이므로 먼저 깨끗해야 한다.
+    if (_handLatched && _topBandHasHand()) {
+      _setCaptureStatus(_CaptureStatus.handOverlap);
+      return;
+    }
+
+    debugPrint(
+      "촬영 라우팅 — handLatched=$_handLatched, "
+      "coversText=${_handCoversText()}, 게이트박스 ${_effectiveHandBoxes().length}개, "
+      "최신감지 detected=${hand.detected} boxes=${hand.boxes.length}.",
+    );
     if (_handLatched && _handCoversText()) {
       // 손이 본문을 가림 → 명령 3: 손이 안 가린 깨끗한 띠만 골라 수집한다.
       await _collectCleanBands();
@@ -571,7 +646,7 @@ class _ScanScreenState extends State<ScanScreen> {
     // 손이 검출/추적되더라도 하단 여백 영역 안에만 있으면 본문은 안 가린 것으로 본다.
 
     // 손이 본문과 안 겹침 → 깨끗한 프레임. 명령 2: 페이지 전체를 한 장으로 촬영.
-    _setCaptureStatus(_CaptureStatus.capturing);
+    _setCaptureStatus(_CaptureStatus.pageChecking);
     await _captureSinglePage();
   }
 
@@ -683,22 +758,63 @@ class _ScanScreenState extends State<ScanScreen> {
     return const [];
   }
 
-  // 손이 본문 영역(하단 여백 위쪽)을 가리는지 판정한다.
-  // 손 박스 윗변이 하단 여백 경계보다 위에 있으면 본문을 가리는 것으로 본다.
+  // 손이 책 본문 영역을 가리는지 판정한다. 가장자리(여백·모서리)만 잡은 손은 무시.
   bool _handCoversText() {
     final boxes = _effectiveHandBoxes();
     if (boxes.isEmpty) return true; // 위치 정보 없음 → 보수적으로 가림 간주
+
+    // ② 손이 본문 영역과 충분히 겹칠 때만 '가림'으로 본다.
+    // 책 모서리·여백만 잡은 손은 본문 영역과 겹침이 작아 무시된다.
+    final textRegion = _innerTextRegion();
     for (final box in boxes) {
-      if (box.top < _bottomRegionTop) return true;
+      final handRect = Rect.fromLTRB(box.left, box.top, box.right, box.bottom);
+      final handArea = handRect.width * handRect.height;
+      if (handArea <= 0) continue;
+      final inter = handRect.intersect(textRegion);
+      if (inter.width <= 0 || inter.height <= 0) continue;
+      final overlapRatio = (inter.width * inter.height) / handArea;
+      if (overlapRatio >= _handOverlapThreshold) return true;
     }
     return false;
   }
 
-  // 디버그 패널 슬라이더에서 하단 여백 경계를 조절한다.
-  void _updateBottomRegionTop(double value) {
-    final clamped = value.clamp(_bottomRegionMin, _bottomRegionMax);
-    if (clamped == _bottomRegionTop || !mounted) return;
-    setState(() => _bottomRegionTop = clamped);
+  // ② '본문 영역' — 책 박스(미검출이면 프레임 전체)를 가장자리 _textRegionInset
+  // 만큼 안으로 들인 사각형. 이 바깥(상·하·좌·우 여백 + 모서리)의 손은 무시된다.
+  Rect _innerTextRegion() {
+    final box = _bookBox ?? const Rect.fromLTRB(0, 0, 1, 1);
+    final marginX = box.width * _textRegionInset;
+    final marginY = box.height * _textRegionInset;
+    return Rect.fromLTRB(
+      box.left + marginX,
+      box.top + marginY,
+      box.right - marginX,
+      box.bottom - marginY,
+    );
+  }
+
+  // ③ 책 박스 맨 위 띠(본문 영역 상단 1/4)에 손이 본문을 가리며 들어와 있는지.
+  // 모서리만 잡은 손은 본문 영역 밖이라 여기 안 걸린다.
+  bool _topBandHasHand() {
+    final boxes = _effectiveHandBoxes();
+    if (boxes.isEmpty) return false;
+    final region = _innerTextRegion();
+    final topBand = Rect.fromLTRB(
+      region.left,
+      region.top,
+      region.right,
+      region.top + region.height / 4,
+    );
+    for (final box in boxes) {
+      final handRect = Rect.fromLTRB(box.left, box.top, box.right, box.bottom);
+      final handArea = handRect.width * handRect.height;
+      if (handArea <= 0) continue;
+      final inter = handRect.intersect(topBand);
+      if (inter.width <= 0 || inter.height <= 0) continue;
+      if ((inter.width * inter.height) / handArea >= _handOverlapThreshold) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // 명령 3: 디버그 패널 슬라이더에서 책등 위치를 수동 보정한다(수동 모드 전환).
@@ -740,6 +856,7 @@ class _ScanScreenState extends State<ScanScreen> {
       _bandCollected[i] = false;
     }
     _bandSegments.clear();
+    _bandPageFingerprint = null;
   }
 
   // 명령 3: 손이 본문을 가린 동안, 손이 안 가린 깨끗한 띠 구간을 골라 수집한다.
@@ -762,7 +879,10 @@ class _ScanScreenState extends State<ScanScreen> {
       _setCaptureStatus(_CaptureStatus.handOverlap);
       return;
     }
-    _setCaptureStatus(_CaptureStatus.capturing);
+    // 맨 위 띠(band 0)는 페이지 식별 기준이므로 '페이지 검사중'으로 표시한다.
+    _setCaptureStatus(
+      start == 0 ? _CaptureStatus.pageChecking : _CaptureStatus.capturing,
+    );
     await _captureBandFrame(start, end);
   }
 
@@ -815,6 +935,46 @@ class _ScanScreenState extends State<ScanScreen> {
         );
         leftLines = await _ocrLines(leftCrop);
         rightLines = await _ocrLines(rightCrop);
+      }
+
+      // 슬라이스 2: 페이지 상단 지문으로, 띠 수집 도중 페이지가 넘어갔는지 검사한다.
+      // bandStart==0 캡처는 상단을 이미 포함하고, 그 외엔 상단 띠를 따로 OCR한다.
+      List<String>? topFingerprint;
+      if (oriented != null) {
+        if (bandStart == 0) {
+          topFingerprint = _buildFingerprintLines(leftLines, rightLines);
+        } else {
+          final topLeft = await _ocrLines(
+            _cropEncode(oriented, 0.0, _probeStripHeight, 0.0, _spineX),
+          );
+          final topRight = await _ocrLines(
+            _cropEncode(oriented, 0.0, _probeStripHeight, _spineX, 1.0),
+          );
+          topFingerprint = _buildFingerprintLines(topLeft, topRight);
+        }
+      }
+      if (topFingerprint != null &&
+          topFingerprint.length >= _fingerprintLineCount) {
+        if (_bandPageFingerprint == null) {
+          _bandPageFingerprint = topFingerprint;
+        } else if (_fingerprintSimilarity(
+              topFingerprint,
+              _bandPageFingerprint!,
+            ) <
+            _rereadSimThreshold) {
+          // 수집 중이던 페이지와 상단 지문이 달라짐 — 페이지가 넘어갔다.
+          // 지금까지 모은 띠를 버리고, 이번 프레임을 새 페이지의 첫 띠로 삼는다.
+          debugPrint("슬라이스 2: 띠 수집 중 페이지 넘김 감지 — 띠 버퍼 리셋.");
+          _resetBandCollection();
+          _bandPageFingerprint = topFingerprint;
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("띠 수집 중 페이지 넘김 감지 — 새 페이지로 다시 시작"),
+              ),
+            );
+          }
+        }
       }
 
       _bandSegments.add(
@@ -1135,6 +1295,11 @@ class _ScanScreenState extends State<ScanScreen> {
         matched = page;
       }
     }
+    debugPrint(
+      "명령 3: 재독 판정 — 최고 유사도 ${bestSim.toStringAsFixed(2)}"
+      "(임계 $_rereadSimThreshold), 새 지문=$fingerprint, "
+      "저장된 페이지 ${_pageStore.map((p) => p.rightNumber).toList()}.",
+    );
 
     if (matched != null && bestSim >= _rereadSimThreshold) {
       // 이미 읽은 페이지 — 새로 저장하지 않는다. 더 선명하면 본문만 교체한다.
@@ -1229,15 +1394,10 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
-  // 슬라이스 3: 맨 위 띠가 모이면 모든 띠를 모으기 전에 상단 지문으로 재독을
-  // 미리 판정한다. 재독이면 나머지 띠 OCR을 건너뛰어 비용을 아낀다. 재독이
-  // 아니거나 아직 지문이 부족하면 아무것도 하지 않고 평소대로 수집을 잇는다.
-  // (조기 검사가 놓쳐도 조립 시점 `_commitSpread`가 다시 거르므로 정확성은 안전.)
-  void _checkEarlyReread() {
-    if (_pageStore.isEmpty) return;
-    final fingerprint = _topPrefixFingerprint();
-    if (fingerprint == null || fingerprint.length < _fingerprintLineCount) {
-      return;
+  // 상단 지문으로 _pageStore에서 같은 페이지(재독)를 찾는다. 없으면 null.
+  _StoredPage? _matchStoredPage(List<String> fingerprint) {
+    if (_pageStore.isEmpty || fingerprint.length < _fingerprintLineCount) {
+      return null;
     }
     _StoredPage? matched;
     double bestSim = 0;
@@ -1248,13 +1408,46 @@ class _ScanScreenState extends State<ScanScreen> {
         matched = page;
       }
     }
-    if (matched == null || bestSim < _rereadSimThreshold) return;
+    return (matched != null && bestSim >= _rereadSimThreshold)
+        ? matched
+        : null;
+  }
 
-    final hit = matched;
+  // 슬라이스 1(페이지 확인 우선): 상단 탐침에서 재독으로 판정된 경우 —
+  // 본문 전체 OCR을 건너뛰고 기존 페이지를 그대로 유지한다.
+  void _handleProbeReread(_StoredPage hit) {
+    _lastCommittedRight = hit.rightNumber;
     debugPrint(
-      "명령 3: 조기 재독 감지 — 기존 ${hit.rightNumber}P, 띠 수집 중단"
-      "(유사도 ${bestSim.toStringAsFixed(2)}).",
+      "페이지 확인: 상단 탐침에서 재독 감지 — 기존 ${hit.rightNumber}P, 본문 OCR 생략.",
     );
+    if (mounted) {
+      AppStateScope.of(
+        context,
+      ).updateBookCurrentPage(widget.bookId, hit.rightNumber);
+      setState(() {
+        _lastOcrFullText = hit.text;
+        _lastOcrSummary = _summaryOf(hit.text);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("이미 읽은 페이지 — ${hit.rightNumber}P, 본문 OCR 생략"),
+        ),
+      );
+    }
+  }
+
+  // 슬라이스 3: 맨 위 띠가 모이면 모든 띠를 모으기 전에 상단 지문으로 재독을
+  // 미리 판정한다. 재독이면 나머지 띠 OCR을 건너뛰어 비용을 아낀다. 재독이
+  // 아니거나 아직 지문이 부족하면 아무것도 하지 않고 평소대로 수집을 잇는다.
+  // (조기 검사가 놓쳐도 조립 시점 `_commitSpread`가 다시 거르므로 정확성은 안전.)
+  void _checkEarlyReread() {
+    final fingerprint = _topPrefixFingerprint();
+    if (fingerprint == null) return;
+    // 슬라이스 1 탐침과 같은 재독 판정 경로(_matchStoredPage)를 그대로 쓴다.
+    final hit = _matchStoredPage(fingerprint);
+    if (hit == null) return;
+
+    debugPrint("명령 3: 조기 재독 감지 — 기존 ${hit.rightNumber}P, 띠 수집 중단.");
     _lastCommittedRight = hit.rightNumber;
     _resetBandCollection();
     _awaitingMotionBeforeNextCapture = true;
@@ -1381,6 +1574,73 @@ class _ScanScreenState extends State<ScanScreen> {
       prevRight = page.rightNumber;
     }
     return buffer.toString();
+  }
+
+  // 분석용 전체 누적 본문 — 영구 페이지 본문(_pagetext.json)에 이번에 새로
+  // 스캔한 페이지를 더해 페이지 번호순으로 펼친다. ui_summary가 새 페이지만이
+  // 아니라 책 전체를 요약하는 데 쓰인다.
+  Future<String> _buildFullBookText() async {
+    final map = <int, String>{};
+    try {
+      final paths = await _getFilePaths();
+      final file = File(paths['pagetext']!);
+      if (await file.exists()) {
+        final raw = await file.readAsString();
+        if (raw.trim().isNotEmpty) {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map) {
+            decoded.forEach((key, value) {
+              final pageNumber = int.tryParse(key.toString());
+              if (pageNumber != null &&
+                  value is String &&
+                  value.trim().isNotEmpty) {
+                map[pageNumber] = value;
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("전체 누적 본문 읽기 오류: $e");
+    }
+    // 아직 _pagetext.json에 병합되지 않은 이번 스캔분을 더한다.
+    for (final page in _pageStore) {
+      if (page.leftText.trim().isNotEmpty) {
+        map[page.leftNumber] = page.leftText;
+      }
+      if (page.rightText.trim().isNotEmpty) {
+        map[page.rightNumber] = page.rightText;
+      }
+    }
+    final pageNumbers = map.keys.toList()..sort();
+    final buffer = StringBuffer();
+    for (final pageNumber in pageNumbers) {
+      buffer.writeln('=== $pageNumber쪽 ===');
+      buffer.writeln(map[pageNumber]!.trim());
+      buffer.writeln();
+    }
+    return buffer.toString();
+  }
+
+  // 관계도 SVG를 백그라운드에서 생성·저장한다(분석 화면 전환을 막지 않음).
+  Future<void> _generateRelationshipSvg(
+    Book book,
+    String fullText,
+    String savePath,
+  ) async {
+    try {
+      final svg = await _claudeService
+          .generateRelationshipSvg(book: book, fullText: fullText)
+          .timeout(const Duration(seconds: 120), onTimeout: () => null);
+      if (svg != null && svg.trim().isNotEmpty) {
+        await File(savePath).writeAsString(svg);
+        debugPrint("관계도 SVG 저장 완료 (${svg.length}자).");
+      } else {
+        debugPrint("관계도 SVG 생성 실패 — 건너뜀.");
+      }
+    } catch (e) {
+      debugPrint("관계도 SVG 생성 오류: $e");
+    }
   }
 
   // 슬라이스 1: 페이지 저장소를 디스크(JSON)에 저장한다.
@@ -1521,6 +1781,8 @@ class _ScanScreenState extends State<ScanScreen> {
         return '손 겹침 · 대기';
       case _CaptureStatus.capturing:
         return '깨끗 · OCR중';
+      case _CaptureStatus.pageChecking:
+        return '페이지 검사중';
     }
   }
 
@@ -1565,34 +1827,35 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       final paths = await _getFilePaths();
       final pagesFile = File(paths['pages']!);
-      final storyDbFile = File(paths['story_db']!);
-      final charDbFile = File(paths['char_db']!);
 
       // 페이지 저장소를 번호순 평문으로 펼친다(누락 구간엔 마커 삽입).
       final String newRawText = _buildFlatTextFromStore();
       if (newRawText.trim().isEmpty) {
         throw Exception("스캔된 새로운 텍스트가 없습니다.");
       }
-      final String oldStoryDb = await storyDbFile.exists()
-          ? await storyDbFile.readAsString()
-          : "{}";
-      final String oldCharDb = await charDbFile.exists()
-          ? await charDbFile.readAsString()
-          : "{}";
 
-      // 1. Gemini 통합 분석 요청 (4가지 데이터 추출)
+      // 기존 맥락 — 직전 분석의 요약·인물을 다음 분석 입력으로 그대로 잇는다.
+      final existingBook = appState.findBookById(widget.bookId);
+      final String oldStory = (existingBook?.summary ?? '').trim().isEmpty
+          ? '(없음)'
+          : existingBook!.summary;
+      final String oldChar = _buildExistingCharacterText(existingBook);
+
+      // 전체 누적 본문 — 분석은 이 본문 전체를 근거로 한다.
+      final String fullBookText = await _buildFullBookText();
+
+      // 1. Gemini 통합 분석 요청 (요약·인물·관계 추출)
       final responseJson = await _getGeminiIntegratedUpdate(
         newRawText,
-        oldStoryDb,
-        oldCharDb,
+        oldStory,
+        oldChar,
+        fullBookText,
       );
       final Map<String, dynamic> result = jsonDecode(responseJson);
 
       // 2. 앱 UI 데이터 업데이트
-      // UI용 요약문
       appState.updateBookSummary(widget.bookId, result['ui_summary'] ?? "");
 
-      // UI용 캐릭터 목록
       if (result['ui_characters'] != null) {
         final rawCharacters = result['ui_characters'];
         if (rawCharacters is List) {
@@ -1600,7 +1863,6 @@ class _ScanScreenState extends State<ScanScreen> {
         }
       }
 
-      // UI용 인물 관계
       if (result['ui_relationships'] != null) {
         final rawRelationships = result['ui_relationships'];
         if (rawRelationships is List) {
@@ -1608,44 +1870,21 @@ class _ScanScreenState extends State<ScanScreen> {
         }
       }
 
-      final bookAfterGemini = appState.findBookById(widget.bookId);
-      if (bookAfterGemini != null && _claudeService.isConfigured) {
-        final claudeResult = await _claudeService
-            .analyzeCharactersAndRelationships(
-              book: bookAfterGemini,
-              newText: newRawText,
-              existingCharacterDb: oldCharDb,
-            );
-
-        if (claudeResult != null) {
-          if (claudeResult.characters.isNotEmpty) {
-            appState.updateBookCharacters(
-              widget.bookId,
-              claudeResult.charactersAsJson(),
-            );
-          }
-          if (claudeResult.relationships.isNotEmpty) {
-            appState.updateBookRelationships(
-              widget.bookId,
-              claudeResult.relationshipsAsJson(),
-            );
-          }
-        }
-      }
-
-      // 3. 내부 고밀도 JSON DB 저장 (다음 분석을 위한 데이터 상속)
-      await storyDbFile.writeAsString(jsonEncode(result['internal_story_db']));
-      await charDbFile.writeAsString(
-        jsonEncode(result['internal_character_db']),
-      );
-
-      // 4. ✅ 페이지 본문을 영구 저장소에 병합한 뒤 작업용 저장소를 비운다.
+      // 3. ✅ 페이지 본문을 영구 저장소에 병합한 뒤 작업용 저장소를 비운다.
       await _mergePageTextStore();
       if (await pagesFile.exists()) await pagesFile.delete();
       _pageStore.clear();
       _topLineFrequency.clear();
       _lastCommittedRight = null;
       debugPrint("🗑️ 분석 완료 — 페이지 본문 보관, 작업 저장소 삭제.");
+
+      // 4. 관계도 SVG 생성(Claude)은 백그라운드로 — 분석 완료·화면 전환을 막지 않는다.
+      final analyzedBook = appState.findBookById(widget.bookId);
+      if (analyzedBook != null && _claudeService.isConfigured) {
+        // 의도적으로 await하지 않는다. 생성이 끝나면 파일로 저장되고
+        // 관계 탭이 그 파일을 읽어 표시한다.
+        _generateRelationshipSvg(analyzedBook, fullBookText, paths['relmap']!);
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1672,10 +1911,26 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
+  // 직전 분석의 인물 목록을 다음 분석 프롬프트의 "기존 인물 데이터"로 넘길 텍스트.
+  // 이름을 그대로 보여줘 Gemini가 같은 인물에 새 이름을 붙이지 않도록 돕는다.
+  String _buildExistingCharacterText(Book? book) {
+    final characters = book?.characters ?? const <Character>[];
+    if (characters.isEmpty) return '(없음)';
+    return characters
+        .map(
+          (c) =>
+              '- ${c.name} / ${c.role} / 중요도 ${c.importance}'
+              '${c.firstPage != null ? ' / 첫등장 ${c.firstPage}쪽' : ''}: '
+              '${c.description}',
+        )
+        .join('\n');
+  }
+
   Future<String> _getGeminiIntegratedUpdate(
     String newText,
     String oldStory,
     String oldChar,
+    String fullText,
   ) async {
     final prompt =
         """
@@ -1691,17 +1946,26 @@ $oldChar
 [새로 스캔된 텍스트]
 $newText
 
+[전체 누적 본문]
+$fullText
+
 지침:
-1. internal_story_db: AI인 당신이 다음에 분석할 때 참고할 매우 상세한 줄거리 데이터입니다. 주요 복선, 시간순 사건을 JSON으로 구성하세요.
-2. internal_character_db: 인물 간의 관계, 성격 변화, 현재 위치 등을 정밀하게 추적하는 JSON 데이터입니다.
-3. ui_summary: 사용자가 앱 화면에서 바로 읽을 수 있도록 자연스러운 10줄 내외의 줄거리 요약입니다. (평문)
-4. ui_characters: 앱의 인물 탭에 리스트로 보여줄 누적 인물 요약 데이터입니다. 형식: [{"name": "이름", "role": "역할", "description": "설명"}]
-   - description은 사용자가 인물 탭에서 바로 이해할 수 있는 한국어 2~3문장으로 작성하세요.
-   - 각 인물의 역할, 현재 상황, 성격/태도 변화, 다른 인물과의 관계를 스캔된 텍스트 근거 안에서만 요약하세요.
+1. ui_summary: 사용자가 앱 화면에서 바로 읽을 수 있는 줄거리 요약입니다. (평문)
+   - 새로 스캔된 부분만이 아니라, 위 [전체 누적 본문]을 처음부터 끝까지 바탕으로 책 전체 줄거리를 요약하세요.
+   - [전체 누적 본문]에 빠진 페이지가 있더라도, 확보된 본문 범위 안에서 자연스럽게 이어지는 요약을 작성하세요.
+   - 가독성이 가장 중요합니다. 한 덩어리 글로 쓰지 말고, 사건 흐름에 따라 3~5개의 짧은 문단으로 나누세요.
+   - 각 문단은 3~4문장 정도로 짧게 쓰고, 문단과 문단 사이는 반드시 빈 줄 하나(줄바꿈 문자 \\n\\n)로 구분하세요.
+   - 시간 순서대로 자연스럽게 이어지게 쓰고, 어려운 표현 없이 쉽게 쓰세요.
+2. ui_characters: 앱의 인물 탭·상세 프로필에 보여줄 누적 인물 데이터입니다. 형식: [{"name": "이름", "role": "역할", "description": "소개", "personality": "성격", "motivation": "목표·동기", "first_page": 12, "importance": 4}]
+   - importance: 이 인물이 이야기에서 차지하는 비중을 1~5 정수로 쓰세요. 주인공·핵심 인물은 5, 자주 등장하는 주요 인물은 4, 조연은 2~3, 한두 번 스쳐 언급될 뿐인 단역은 1.
+   - description: 인물이 누구인지 한국어 2~3문장으로 소개하세요. 역할과 현재 상황 위주로.
+   - personality: 인물의 성격·태도를 1~2문장으로 쓰세요. 텍스트에서 확인되는 행동·말에 근거해서. 아직 드러나지 않았으면 빈 문자열("")로 두세요.
+   - motivation: 인물이 원하는 것·목표·행동 동기를 1~2문장으로 쓰세요. 아직 드러나지 않았으면 빈 문자열("")로 두세요.
+   - first_page: 이 인물이 [전체 누적 본문]에서 처음 등장하는 페이지 번호입니다. "=== N쪽 ===" 표시를 기준으로 정수로 쓰세요. 판단이 어려우면 이 항목을 생략하세요.
+   - 모든 항목은 스캔된 텍스트 근거 안에서만 쓰고, 확실하지 않은 추측·앞으로의 전개 예측·텍스트에 없는 배경 설정은 넣지 마세요.
    - 기존 인물 데이터가 있으면 새 텍스트와 합쳐 누적 업데이트하세요. 새 텍스트에 나오지 않았다는 이유만으로 기존 사실을 지우지 마세요.
-   - 확실하지 않은 추측, 앞으로의 전개 예측, 텍스트에 없는 배경 설정은 쓰지 마세요.
    - 잠깐 언급된 인물은 억지로 길게 쓰지 말고 확인된 사실만 짧게 쓰세요.
-5. ui_relationships: 앱의 관계 탭에 표시할 인물 관계 데이터입니다. 형식: [{"source": "인물 이름", "target": "인물 이름", "label": "짧은 관계명", "description": "관계 설명", "evidence": "근거", "strength": 1, "type": "관계 유형"}]
+3. ui_relationships: 앱의 관계 탭에 표시할 인물 관계 데이터입니다. 형식: [{"source": "인물 이름", "target": "인물 이름", "label": "짧은 관계명", "description": "관계 설명", "evidence": "근거", "strength": 1, "type": "관계 유형"}]
    - source와 target은 반드시 ui_characters에 포함된 실제 인물 이름을 그대로 쓰세요.
    - label은 "친구", "가족", "협력", "대립", "스승과 제자"처럼 화면에 올릴 짧은 표현으로 쓰세요.
    - description은 두 인물 사이의 현재 관계를 1~2문장으로 설명하세요.
@@ -1709,13 +1973,19 @@ $newText
    - strength는 관계가 얼마나 뚜렷한지 1~5 정수로 쓰세요. 잠깐 언급된 약한 관계는 1, 반복되고 서사적으로 중요한 관계는 5입니다.
    - type은 ally, family, conflict, romance, mentor, mystery, neutral 중 가장 가까운 값을 쓰세요.
    - 관계가 확실하지 않거나 한쪽 인물이 불명확하면 넣지 마세요.
-6. ui_characters에는 실제 등장인물만 넣으세요. 다음은 넣지 마세요:
+4. ui_characters에는 이야기에서 한 개인으로 추적 가능한 등장인물만 넣으세요. 다음은 넣지 마세요:
    - 군중, 주민들, 학생들, 사람들 같은 집단 표현
-   - 화자, 서술자, 주인공, 누군가, 친구 같은 일반 명사
-   - 직책이나 관계만 있고 고유하게 식별되지 않는 표현
    - 장소, 단체, 개념, 사물
-7. 이름이 분명하지 않으면 억지로 넣지 말고 제외하세요.
-8. 한 번만 스쳐 지나가는 일반 호칭보다, 이야기에서 실제 인물로 추적 가능한 대상만 남기세요.
+   - 컴퓨터, 인공지능(AI)·시스템, 기계, 로봇, 장비, 도구, 우주선·차량 같은 인공물 (대화하거나 인격적으로 묘사되더라도 도구이므로 제외)
+   - "누군가", "어떤 사람", "친구"처럼 특정 개인을 가리키지 않는 막연한 표현
+   - 한 번 스쳐 지나갈 뿐 한 개인으로 추적되지 않는 일반 호칭
+5. 등장인물은 사람, 또는 외계 생명체처럼 이야기에서 인격·의지를 지닌 인물로 다뤄지는 생명체에 한합니다. 그 전제 위에서, 이름이 아직 밝혀지지 않은 인물도 이야기에서 한 개인으로 일관되게 추적된다면 반드시 포함하세요.
+   - 1인칭 시점으로 서사를 이끄는 화자·주인공은 이름이 없어도 가장 핵심 인물입니다. 반드시 포함하고 name을 "주인공(이름 미상)"으로 표기하세요.
+   - 그 밖에 이름은 없지만 한 개인으로 추적되는 인물은 "죽은 동료 A", "정체불명의 남자"처럼 식별 가능한 서술형 이름으로 포함하세요.
+   - ★매우 중요★ [기존 인물 데이터]에 이미 있는 인물은 그 이름(name)을 한 글자도 바꾸지 말고 그대로 다시 쓰세요. 같은 인물에게 새 이름이나 다른 표기를 붙이지 마세요. 예: 기존에 "죽은 동료 A"가 있으면 이번에도 반드시 "죽은 동료 A"라고 쓰고, "죽은 동료 1"이나 "사망한 동료" 같은 새 이름을 만들지 마세요.
+   - 이름 없는 잠정 인물(죽은 동료 등)은 본문에 실제로 존재하는 인원수만큼만 만드세요. 같은 인물을 여러 항목으로 중복해서 넣지 마세요. 예: 본문에 죽은 동료가 2명이면 항목도 정확히 2개입니다.
+   - 기존 인물 데이터에 잠정 이름("이름 미상" 등)의 인물이 있고 새 텍스트에서 실제 이름이 밝혀지면, 잠정 이름 항목을 실명으로 교체해 누적 업데이트하세요(중복 항목을 만들지 마세요).
+6. 직책이나 관계만 있고 특정 개인으로 식별·추적되지 않는 대상은 넣지 마세요. 추적 가능한 단수 개인만 남기세요.
 
 응답은 반드시 마크다운 기호 없이 순수한 JSON 객체 하나만 출력하세요.
 """;
@@ -1736,6 +2006,8 @@ $newText
         "generationConfig": {
           "temperature": 0.7,
           "response_mime_type": "application/json",
+          // 내부 추론(thinking)을 꺼서 분석 응답 속도를 높인다.
+          "thinkingConfig": {"thinkingBudget": 0},
         },
       }),
     );
@@ -1840,13 +2112,12 @@ $newText
                 onStopPressed: _stopAutoCapture,
                 debugEnabled: _debugPanelEnabled,
                 handResult: _handResult,
+                bookBox: _bookBox,
                 captureStatusLabel: _captureStatusLabel,
                 ocrSummary: _lastOcrSummary,
                 handLatched: _handLatched,
                 trackedHandBox: _trackedHandBox,
-                bottomRegionTop: _bottomRegionTop,
                 handCoversText: _handLatched && _handCoversText(),
-                onBottomRegionChanged: _updateBottomRegionTop,
                 spineX: _spineX,
                 spineManualOverride: _spineManualOverride,
                 onSpineChanged: _updateSpineX,
@@ -1959,4 +2230,5 @@ enum _CaptureStatus {
   checkingHand, // 안정됨, 손 감지 결과 확인 중
   handOverlap, // 손이 본문과 겹침 → 대기
   capturing, // 깨끗한 프레임 → 촬영·OCR 진행 중
+  pageChecking, // 상단 띠 OCR로 페이지(재독) 검사 중
 }

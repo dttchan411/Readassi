@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
@@ -9,9 +10,9 @@ class ClaudeService {
   ClaudeService({http.Client? client}) : _client = client ?? http.Client();
 
   static const _compileTimeApiKey = String.fromEnvironment('ANTHROPIC_API_KEY');
-  static const _model = String.fromEnvironment(
+  static const _compileTimeModel = String.fromEnvironment(
     'ANTHROPIC_MODEL',
-    defaultValue: 'claude-sonnet-4-20250514',
+    defaultValue: 'claude-sonnet-4-6',
   );
   static const _apiUrl = 'https://api.anthropic.com/v1/messages';
   static const _anthropicVersion = '2023-06-01';
@@ -21,6 +22,11 @@ class ClaudeService {
   String get _apiKey {
     final envKey = dotenv.env['ANTHROPIC_API_KEY'] ?? '';
     return envKey.trim().isNotEmpty ? envKey : _compileTimeApiKey;
+  }
+
+  String get _model {
+    final envModel = dotenv.env['ANTHROPIC_MODEL'] ?? '';
+    return envModel.trim().isNotEmpty ? envModel : _compileTimeModel;
   }
 
   bool get isConfigured => _apiKey.trim().isNotEmpty;
@@ -187,6 +193,71 @@ $question
     );
   }
 
+  /// 책 전체 본문을 Claude에 주고, 인물 관계도를 SVG 한 장으로 받는다.
+  /// 성공 시 `<svg ...>...</svg>` 문자열을, 실패 시 null을 반환한다.
+  Future<String?> generateRelationshipSvg({
+    required Book book,
+    required String fullText,
+  }) async {
+    if (!isConfigured || fullText.trim().isEmpty) {
+      return null;
+    }
+
+    final characterNames = book.characters
+        .map((character) => character.name)
+        .where((name) => name.trim().isNotEmpty)
+        .join(', ');
+
+    final raw = await _sendMessage(
+      system:
+          'You generate a clean, readable character-relationship diagram as a '
+          'single self-contained SVG. Output ONLY raw SVG markup that starts '
+          'with <svg and ends with </svg>. No markdown, no code fences, no '
+          'explanation.',
+      userPrompt:
+          '''
+다음은 한국어 책 "${book.title}"의 본문입니다. 등장인물 사이의 관계를 한눈에 볼 수 있는 관계도를 SVG 하나로 그리세요.
+
+[주요 등장인물]
+$characterNames
+
+[책 본문]
+$fullText
+
+요구사항:
+- 출력은 오직 SVG 마크업 하나입니다. <svg ...> ... </svg> 외에는 아무것도 출력하지 마세요.
+- 루트 <svg>에 width="800", height="600", viewBox="0 0 800 600"을 지정하세요.
+- 각 인물은 노드(원 또는 둥근 사각형 + 이름 텍스트)로, 두 인물의 관계는 둘을 잇는 선으로 그리세요.
+- 선 가운데에 짧은 관계명(예: 친구, 동료, 가족, 대립, 연인)을 텍스트로 표시하세요.
+- 노드끼리, 그리고 선·텍스트가 서로 겹치지 않게 충분히 간격을 두세요. 비중이 큰 인물은 가운데에, 비중이 낮은 인물은 바깥쪽에 배치하세요.
+- 가독성이 가장 중요합니다. 인물은 8명 이하, 관계선은 12개 이하로 핵심만 추리세요.
+- 모든 글자는 한국어로, 크기는 13~16 정도로 또렷하게 쓰세요.
+- 배경은 연한 베이지(#FDFBF7), 색은 단순하게 쓰세요.
+- <filter>, <style>(CSS), 외부 폰트, <image>는 사용하지 마세요. circle, rect, line, path, polygon, text 같은 기본 도형과 fill·stroke 속성만 쓰세요.
+''',
+      maxTokens: 8000,
+    );
+
+    if (raw == null) {
+      return null;
+    }
+
+    final start = raw.indexOf('<svg');
+    final end = raw.lastIndexOf('</svg>');
+    if (start == -1 || end == -1 || end <= start) {
+      debugPrint(
+        '[ClaudeService] SVG 태그를 찾지 못함 — 응답 앞부분: ${_truncate(raw)}',
+      );
+      return null;
+    }
+    return raw.substring(start, end + 6);
+  }
+
+  String _truncate(String value, [int max = 600]) {
+    final trimmed = value.trim();
+    return trimmed.length <= max ? trimmed : '${trimmed.substring(0, max)}…';
+  }
+
   Future<String?> _sendMessage({
     required String system,
     required String userPrompt,
@@ -211,18 +282,26 @@ $question
       );
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        debugPrint(
+          '[ClaudeService] HTTP ${response.statusCode} (model=$_model) — '
+          '${_truncate(response.body)}',
+        );
         return null;
       }
 
       final decoded = jsonDecode(response.body) as Map<String, dynamic>;
       final content = decoded['content'] as List<dynamic>? ?? const [];
       if (content.isEmpty) {
+        debugPrint(
+          '[ClaudeService] 빈 content — ${_truncate(response.body)}',
+        );
         return null;
       }
 
       final first = content.first as Map<String, dynamic>;
       return (first['text'] as String?)?.trim();
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[ClaudeService] 예외: $e');
       return null;
     }
   }

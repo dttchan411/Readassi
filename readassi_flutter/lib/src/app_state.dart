@@ -120,15 +120,23 @@ class AppState extends ChangeNotifier {
     if (index == -1) return;
 
     final oldBook = _books[index];
-    final charactersByName = {
+    // 기존 인물은 이름으로 "조회"만 한다(같은 인물의 id·이미지·누적 정보를 잇기 위함).
+    // 출력 목록은 이번 분석 결과(rawCharacters)만으로 다시 구성한다 — 그래야
+    // 분석마다 잠정 이름("죽은 동료 A" 등)이 달라져도 같은 인물이 중복 누적되지 않는다.
+    final oldByName = {
       for (final character in oldBook.characters) character.name: character,
     };
 
+    final characters = <Character>[];
     final seenNames = <String>{};
     for (final item in rawCharacters.whereType<Map<String, dynamic>>()) {
       final name = _normalizeCharacterField(item['name']);
       final role = _normalizeCharacterField(item['role']);
       final description = _normalizeCharacterField(item['description']);
+      final personality = _normalizeCharacterField(item['personality']);
+      final motivation = _normalizeCharacterField(item['motivation']);
+      final firstPage = _normalizeFirstPage(item['first_page']);
+      final importance = _normalizeImportance(item['importance']);
 
       if (!_looksLikeRealCharacter(name, role, description)) {
         continue;
@@ -138,20 +146,53 @@ class AppState extends ChangeNotifier {
         continue;
       }
 
-      final existing = charactersByName[name];
-      charactersByName[name] = Character(
-        id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
-        name: name,
-        role: _selectCharacterRole(existing?.role, role),
-        description: _selectCharacterDescription(
-          existing?.description,
-          description,
+      final existing = oldByName[name];
+      characters.add(
+        Character(
+          id: existing?.id ?? '${oldBook.id}_${name.hashCode.abs()}',
+          name: name,
+          role: _selectCharacterRole(existing?.role, role),
+          description: _selectCharacterDescription(
+            existing?.description,
+            description,
+          ),
+          imageUrl: existing?.imageUrl ?? '',
+          personality: _selectRelationshipText(
+            existing?.personality,
+            personality,
+          ),
+          motivation: _selectRelationshipText(existing?.motivation, motivation),
+          firstPage: _selectFirstPage(existing?.firstPage, firstPage),
+          importance: _selectImportance(existing?.importance, importance),
         ),
-        imageUrl: existing?.imageUrl ?? '',
       );
     }
 
-    final characters = charactersByName.values.toList();
+    // 이번 분석에서 유효 인물이 하나도 없으면 기존 목록을 유지한다(목록 증발 방지).
+    if (characters.isEmpty) {
+      return;
+    }
+
+    // 주인공 보존 — 이번 결과에 주인공이 없는데 기존엔 있었다면 기존 주인공을 잇는다.
+    if (!characters.any((character) => character.name.contains('주인공'))) {
+      for (final old in oldBook.characters) {
+        if (old.name.contains('주인공') &&
+            !characters.any((character) => character.name == old.name)) {
+          characters.add(old);
+          break;
+        }
+      }
+    }
+
+    // 중요도 내림차순 정렬 — 주인공은 항상 맨 위.
+    characters.sort((a, b) {
+      final aIsProtagonist = a.name.contains('주인공') ? 1 : 0;
+      final bIsProtagonist = b.name.contains('주인공') ? 1 : 0;
+      if (aIsProtagonist != bIsProtagonist) {
+        return bIsProtagonist - aIsProtagonist;
+      }
+      return b.importance.compareTo(a.importance);
+    });
 
     final updatedBook = Book(
       id: oldBook.id,
@@ -552,6 +593,43 @@ class AppState extends ChangeNotifier {
     return text.length + meaningfulWords * 2 + detailScore * 8;
   }
 
+  int? _normalizeFirstPage(dynamic value) {
+    final page = switch (value) {
+      int number => number,
+      double number => number.round(),
+      String text => int.tryParse(text.trim()),
+      _ => null,
+    };
+    if (page == null || page <= 0) return null;
+    return page;
+  }
+
+  // 첫 등장 페이지는 분석을 거듭해도 가장 이른 페이지를 유지한다.
+  int? _selectFirstPage(int? existing, int? incoming) {
+    if (existing == null) return incoming;
+    if (incoming == null) return existing;
+    return existing < incoming ? existing : incoming;
+  }
+
+  int? _normalizeImportance(dynamic value) {
+    final importance = switch (value) {
+      int number => number,
+      double number => number.round(),
+      String text => int.tryParse(text.trim()),
+      _ => null,
+    };
+    if (importance == null) return null;
+    return importance.clamp(1, 5);
+  }
+
+  // 중요도는 분석을 거듭해도 가장 높게 평가된 값을 유지한다. 둘 다 없으면 보통(3).
+  int _selectImportance(int? existing, int? incoming) {
+    if (existing == null && incoming == null) return 3;
+    if (existing == null) return incoming!;
+    if (incoming == null) return existing;
+    return existing > incoming ? existing : incoming;
+  }
+
   int _normalizeRelationshipStrength(dynamic value) {
     final strength = switch (value) {
       int number => number,
@@ -632,12 +710,22 @@ class AppState extends ChangeNotifier {
 
     if (bannedNameKeywords.any(name.contains)) return false;
 
+    // 컴퓨터·기계·시스템 등 사물은 등장인물이 아니다.
+    const machineKeywords = {
+      '컴퓨터',
+      '인공지능',
+      '로봇',
+      '기계',
+      '시스템',
+      '프로그램',
+    };
+    if (machineKeywords.any(name.contains)) return false;
+
+    // '화자'·'서술'은 제외하지 않는다 — 1인칭 시점 주인공도 실제 핵심 인물이다.
     const genericRoleKeywords = {
       '단체',
       '집단',
       '배경',
-      '서술',
-      '화자',
       '군중',
       '마을 사람',
       '주민',

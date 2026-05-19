@@ -5,6 +5,10 @@ class Character {
     required this.role,
     required this.description,
     required this.imageUrl,
+    this.personality = '',
+    this.motivation = '',
+    this.firstPage,
+    this.importance = 3,
   });
 
   final String id;
@@ -12,6 +16,10 @@ class Character {
   final String role;
   final String description;
   final String imageUrl;
+  final String personality;
+  final String motivation;
+  final int? firstPage;
+  final int importance;
 
   Map<String, dynamic> toJson() {
     return {
@@ -20,6 +28,10 @@ class Character {
       'role': role,
       'description': description,
       'imageUrl': imageUrl,
+      'personality': personality,
+      'motivation': motivation,
+      'firstPage': firstPage,
+      'importance': importance,
     };
   }
 
@@ -30,6 +42,10 @@ class Character {
       role: json['role'] as String,
       description: json['description'] as String,
       imageUrl: json['imageUrl'] as String,
+      personality: json['personality'] as String? ?? '',
+      motivation: json['motivation'] as String? ?? '',
+      firstPage: json['firstPage'] as int?,
+      importance: json['importance'] is int ? json['importance'] as int : 3,
     );
   }
 }

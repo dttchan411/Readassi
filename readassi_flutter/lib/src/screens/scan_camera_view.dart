@@ -14,13 +14,12 @@ class ScanCameraView extends StatelessWidget {
   final VoidCallback onStopPressed;
   final bool debugEnabled;
   final HandDetectionResult? handResult;
+  final Rect? bookBox;
   final String captureStatusLabel;
   final String? ocrSummary;
   final bool handLatched;
   final HandBox? trackedHandBox;
-  final double bottomRegionTop;
   final bool handCoversText;
-  final ValueChanged<double>? onBottomRegionChanged;
   final double spineX;
   final bool spineManualOverride;
   final ValueChanged<double>? onSpineChanged;
@@ -42,13 +41,12 @@ class ScanCameraView extends StatelessWidget {
     required this.onStopPressed,
     this.debugEnabled = false,
     this.handResult,
+    this.bookBox,
     this.captureStatusLabel = '대기 중',
     this.ocrSummary,
     this.handLatched = false,
     this.trackedHandBox,
-    this.bottomRegionTop = 0.80,
     this.handCoversText = false,
-    this.onBottomRegionChanged,
     this.spineX = 0.5,
     this.spineManualOverride = false,
     this.onSpineChanged,
@@ -77,12 +75,13 @@ class ScanCameraView extends StatelessWidget {
                     color: Colors.black,
                     child: CameraPreview(controller),
                   ),
+                  // 실시간 책 테두리 박스 + 4분할선 — 디버그와 무관하게 항상 표시.
+                  CustomPaint(painter: _BookBoxPainter(bookBox)),
                   if (debugEnabled)
                     CustomPaint(
                       painter: _HandBoxPainter(
                         handResult?.boxes ?? const [],
                         trackedHandBox,
-                        bottomRegionTop,
                         spineX,
                         bandCount,
                         bandCoverage,
@@ -264,7 +263,7 @@ class ScanCameraView extends StatelessWidget {
       if (handLatched) {
         lines.add(
           _debugLine(
-            handCoversText ? "손 위치: 본문 가림" : "손 위치: 하단 여백 (촬영 허용)",
+            handCoversText ? "손 위치: 본문 가림" : "손 위치: 가장자리/여백 (촬영 허용)",
             handCoversText
                 ? const Color(0xFFFF8A80)
                 : const Color(0xFF69F0AE),
@@ -326,29 +325,6 @@ class ScanCameraView extends StatelessWidget {
                 ),
               ),
             ),
-          ),
-        ),
-      );
-    }
-
-    final onRegionChanged = onBottomRegionChanged;
-    if (onRegionChanged != null) {
-      lines.add(
-        _debugLine(
-          "하단 경계: ${(bottomRegionTop * 100).round()}%  (슬라이더로 조절)",
-          const Color(0xFF00E5FF),
-        ),
-      );
-      lines.add(
-        SizedBox(
-          width: 250,
-          child: Slider(
-            value: bottomRegionTop.clamp(0.5, 0.95),
-            min: 0.5,
-            max: 0.95,
-            activeColor: const Color(0xFF00E5FF),
-            inactiveColor: Colors.white24,
-            onChanged: onRegionChanged,
           ),
         ),
       );
@@ -470,14 +446,52 @@ class ScanCameraView extends StatelessWidget {
   }
 }
 
+/// 실시간으로 검출된 책 테두리 박스(정규화 Rect)와 그 안의 4분할선을 그린다.
+class _BookBoxPainter extends CustomPainter {
+  _BookBoxPainter(this.bookBox);
+
+  final Rect? bookBox;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final box = bookBox;
+    if (box == null) return;
+    final rect = Rect.fromLTRB(
+      box.left * size.width,
+      box.top * size.height,
+      box.right * size.width,
+      box.bottom * size.height,
+    );
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3,
+    );
+    // 박스 안 4분할 가로선.
+    final divider = Paint()
+      ..color = Colors.white.withValues(alpha: 0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (int i = 1; i < 4; i++) {
+      final y = rect.top + rect.height * i / 4;
+      canvas.drawLine(Offset(rect.left, y), Offset(rect.right, y), divider);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_BookBoxPainter oldDelegate) =>
+      oldDelegate.bookBox != bookBox;
+}
+
 /// 디버그 오버레이를 카메라 프리뷰 위에 그린다.
-/// 검출된 손은 초록, 추적 유지 중인 위치는 주황, 하단 여백은 청록으로 표시하고,
+/// 검출된 손은 초록, 추적 유지 중인 위치는 주황으로 표시하고,
 /// 명령 3의 가로 띠 경계선과 손이 덮은 띠(빨강 음영)를 나타낸다.
 class _HandBoxPainter extends CustomPainter {
   _HandBoxPainter(
     this.boxes,
     this.trackedBox,
-    this.bottomRegionTop,
     this.spineX,
     this.bandCount,
     this.bandCoverage,
@@ -486,7 +500,6 @@ class _HandBoxPainter extends CustomPainter {
 
   final List<HandBox> boxes;
   final HandBox? trackedBox;
-  final double bottomRegionTop;
   final double spineX;
   final int bandCount;
   final List<bool> bandCoverage;
@@ -508,23 +521,6 @@ class _HandBoxPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 하단 여백(촬영 허용) 영역 표시
-    final regionY = bottomRegionTop * size.height;
-    canvas.drawRect(
-      Rect.fromLTRB(0, regionY, size.width, size.height),
-      Paint()
-        ..color = const Color(0x2200B8D4)
-        ..style = PaintingStyle.fill,
-    );
-    canvas.drawLine(
-      Offset(0, regionY),
-      Offset(size.width, regionY),
-      Paint()
-        ..color = const Color(0xFF00B8D4)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
-    );
-
     // 명령 3: 가로 띠 경계선 + 손이 덮은 띠 빨강 음영
     if (bandCount > 0) {
       final dividerPaint = Paint()
@@ -582,7 +578,6 @@ class _HandBoxPainter extends CustomPainter {
   bool shouldRepaint(_HandBoxPainter oldDelegate) =>
       oldDelegate.boxes != boxes ||
       oldDelegate.trackedBox != trackedBox ||
-      oldDelegate.bottomRegionTop != bottomRegionTop ||
       oldDelegate.spineX != spineX ||
       oldDelegate.bandCount != bandCount ||
       oldDelegate.bandCoverage != bandCoverage ||

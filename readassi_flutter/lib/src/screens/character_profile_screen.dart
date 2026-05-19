@@ -1,20 +1,17 @@
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
-import '../widgets/book_cover.dart';
 
 class CharacterProfileScreen extends StatelessWidget {
-  const CharacterProfileScreen({
-    required this.book,
-    required this.character,
-    super.key,
-  });
+  const CharacterProfileScreen({required this.character, super.key});
 
-  final Book book;
   final Character character;
 
   @override
   Widget build(BuildContext context) {
+    final personality = character.personality.trim();
+    final motivation = character.motivation.trim();
+
     return Scaffold(
       backgroundColor: const Color(0xFFFDFBF7),
       appBar: AppBar(
@@ -52,6 +49,15 @@ class CharacterProfileScreen extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (character.firstPage != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    '${character.firstPage}쪽에 처음 등장',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF7D746C),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -67,114 +73,33 @@ class CharacterProfileScreen extends StatelessWidget {
               ).textTheme.bodyLarge?.copyWith(height: 1.7),
             ),
           ),
-          const SizedBox(height: 16),
-          _ProfileCard(
-            title: '등장 작품',
-            child: Row(
-              children: [
-                BookCover(
-                  imageUrl: book.coverUrl,
-                  width: 54,
-                  height: 78,
-                  borderRadius: 16,
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        book.title,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        book.author,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: const Color(0xFF7D746C),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (book.relationships.isNotEmpty) ...[
+          if (personality.isNotEmpty) ...[
             const SizedBox(height: 16),
             _ProfileCard(
-              title: '관계 힌트',
-              child: Column(
-                children: book.relationships
-                    .where(
-                      (relationship) => _relationshipIncludesCharacter(
-                        relationship,
-                        character,
-                      ),
-                    )
-                    .map(
-                      (relationship) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 10,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF9F4EC),
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            child: Text(
-                              _relationshipHintText(relationship, character),
-                              style: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                        ),
-                      ),
-                    )
-                    .toList(),
+              title: '성격',
+              child: Text(
+                personality,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyLarge?.copyWith(height: 1.7),
+              ),
+            ),
+          ],
+          if (motivation.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _ProfileCard(
+              title: '목표·동기',
+              child: Text(
+                motivation,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyLarge?.copyWith(height: 1.7),
               ),
             ),
           ],
         ],
       ),
     );
-  }
-
-  bool _relationshipIncludesCharacter(
-    Relationship relationship,
-    Character character,
-  ) {
-    return relationship.source == character.id ||
-        relationship.source == character.name ||
-        relationship.target == character.id ||
-        relationship.target == character.name;
-  }
-
-  String _relationshipHintText(Relationship relationship, Character character) {
-    final otherReference =
-        relationship.source == character.id ||
-            relationship.source == character.name
-        ? relationship.target
-        : relationship.source;
-    final other = _characterNameFromReference(otherReference);
-    final description = relationship.description.isEmpty
-        ? relationship.label
-        : relationship.description;
-    return '$other · $description';
-  }
-
-  String _characterNameFromReference(String reference) {
-    for (final candidate in book.characters) {
-      if (candidate.id == reference || candidate.name == reference) {
-        return candidate.name;
-      }
-    }
-    return reference;
   }
 }
 
