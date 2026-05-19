@@ -465,12 +465,17 @@ class _ScanScreenState extends State<ScanScreen> {
         final stripBottom = box.top + _probeStripHeight * box.height;
         // 페이지 확인 우선: 상단 좁은 띠만 먼저 OCR해 재독인지 본다.
         // 재독이면 본문 전체 OCR을 건너뛴다.
-        final probeLeft = await _ocrLines(
-          _cropEncode(oriented, box.top, stripBottom, box.left, spine),
-        );
-        final probeRight = await _ocrLines(
-          _cropEncode(oriented, box.top, stripBottom, spine, box.right),
-        );
+        // 좌·우 상단 탐침을 동시에(병렬) OCR한다.
+        final probeResults = await Future.wait([
+          _ocrLines(
+            _cropEncode(oriented, box.top, stripBottom, box.left, spine),
+          ),
+          _ocrLines(
+            _cropEncode(oriented, box.top, stripBottom, spine, box.right),
+          ),
+        ]);
+        final probeLeft = probeResults[0];
+        final probeRight = probeResults[1];
         final probeFingerprint = _buildFingerprintLines(probeLeft, probeRight);
         final reread = _matchStoredPage(probeFingerprint);
         debugPrint(
@@ -496,8 +501,13 @@ class _ScanScreenState extends State<ScanScreen> {
           oriented, box.top, box.bottom, box.left, spine);
         final rightCrop = _cropEncode(
           oriented, box.top, box.bottom, spine, box.right);
-        leftLines = await _ocrLines(leftCrop);
-        rightLines = await _ocrLines(rightCrop);
+        // 좌·우 페이지 본문을 동시에(병렬) OCR한다.
+        final fullResults = await Future.wait([
+          _ocrLines(leftCrop),
+          _ocrLines(rightCrop),
+        ]);
+        leftLines = fullResults[0];
+        rightLines = fullResults[1];
       }
       await _commitSpread(leftLines, rightLines, false);
       // 페이지 전체를 깨끗하게 한 장으로 찍었으므로, 진행 중이던 띠 수집은 폐기.
@@ -611,12 +621,12 @@ class _ScanScreenState extends State<ScanScreen> {
 
     _stableSince ??= now;
 
+    // 움직임이 멈춘 뒤 안정 시간(1.2초)만 충족하면 진행한다.
+    // 고정 쿨다운은 게이트에서 빼고, 띠 수집 경로에서만 따로 적용한다(아래).
+    // 전체 OCR 경로는 직전 캡처 이후 움직임이 한 번 감지돼야 하므로
+    // (_awaitingMotionBeforeNextCapture) 중복 캡처 위험 없이 쿨다운을 없앨 수 있다.
     final stableDuration = now.difference(_stableSince!);
-    final cooldownFinished =
-        _lastCaptureAt == null ||
-        now.difference(_lastCaptureAt!) >= _captureCooldownDuration;
-
-    if (!(cooldownFinished && stableDuration >= _stabilityRequiredDuration)) {
+    if (stableDuration < _stabilityRequiredDuration) {
       // 아직 안정 시간이 모자람 — 안정될 때까지 대기.
       _setCaptureStatus(_CaptureStatus.motion);
       return;
@@ -649,12 +659,19 @@ class _ScanScreenState extends State<ScanScreen> {
     );
     if (_handLatched && _handCoversText()) {
       // 손이 본문을 가림 → 명령 3: 손이 안 가린 깨끗한 띠만 골라 수집한다.
+      // 띠 수집은 현행 페이싱 유지 — 직전 캡처로부터 쿨다운(2초)을 적용한다.
+      if (_lastCaptureAt != null &&
+          now.difference(_lastCaptureAt!) < _captureCooldownDuration) {
+        _setCaptureStatus(_CaptureStatus.motion);
+        return;
+      }
       await _collectCleanBands();
       return;
     }
     // 손이 검출/추적되더라도 하단 여백 영역 안에만 있으면 본문은 안 가린 것으로 본다.
 
     // 손이 본문과 안 겹침 → 깨끗한 프레임. 명령 2: 페이지 전체를 한 장으로 촬영.
+    // 빠른 경로 — 쿨다운 없이 움직임이 멈춘 즉시 전체 OCR로 잡는다.
     _setCaptureStatus(_CaptureStatus.pageChecking);
     await _captureSinglePage();
   }
