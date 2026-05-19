@@ -24,9 +24,8 @@ class ScanCameraView extends StatelessWidget {
   final bool spineManualOverride;
   final ValueChanged<double>? onSpineChanged;
   final VoidCallback? onSpineAutoReset;
-  final int bandCount;
-  final List<bool> bandCoverage;
-  final List<bool> bandCollected;
+  final List<bool> cellCoverage;
+  final List<bool> cellCollected;
   final VoidCallback? onShowFullOcr;
 
   const ScanCameraView({
@@ -51,9 +50,8 @@ class ScanCameraView extends StatelessWidget {
     this.spineManualOverride = false,
     this.onSpineChanged,
     this.onSpineAutoReset,
-    this.bandCount = 4,
-    this.bandCoverage = const [],
-    this.bandCollected = const [],
+    this.cellCoverage = const [],
+    this.cellCollected = const [],
     this.onShowFullOcr,
   });
 
@@ -75,17 +73,20 @@ class ScanCameraView extends StatelessWidget {
                     color: Colors.black,
                     child: CameraPreview(controller),
                   ),
-                  // 실시간 책 테두리 박스 + 4분할선 — 디버그와 무관하게 항상 표시.
-                  CustomPaint(painter: _BookBoxPainter(bookBox)),
+                  // 책 테두리 박스 + 8칸 격자 — 항상 표시. 칸 음영은 디버그일 때만.
+                  CustomPaint(
+                    painter: _BookBoxPainter(
+                      bookBox,
+                      debugEnabled ? cellCoverage : const [],
+                      debugEnabled ? cellCollected : const [],
+                    ),
+                  ),
                   if (debugEnabled)
                     CustomPaint(
                       painter: _HandBoxPainter(
                         handResult?.boxes ?? const [],
                         trackedHandBox,
                         spineX,
-                        bandCount,
-                        bandCoverage,
-                        bandCollected,
                       ),
                     ),
                 ],
@@ -272,27 +273,37 @@ class ScanCameraView extends StatelessWidget {
       }
     }
 
-    if (bandCoverage.isNotEmpty) {
-      final marks = StringBuffer();
+    if (cellCoverage.isNotEmpty) {
       int collectedCount = 0;
-      for (int i = 0; i < bandCoverage.length; i++) {
-        final collected = i < bandCollected.length && bandCollected[i];
-        if (collected) {
-          marks.write('●');
-          collectedCount++;
-        } else if (bandCoverage[i]) {
-          marks.write('■');
-        } else {
-          marks.write('□');
+      // 4행 × 2열 — 행 단위로 좌/우 칸 마크를 표시한다.
+      for (int row = 0; row < cellCoverage.length ~/ 2; row++) {
+        final rowMarks = StringBuffer();
+        for (int col = 0; col < 2; col++) {
+          final i = row * 2 + col;
+          final collected = i < cellCollected.length && cellCollected[i];
+          if (collected) {
+            rowMarks.write('●');
+            collectedCount++;
+          } else if (cellCoverage[i]) {
+            rowMarks.write('■');
+          } else {
+            rowMarks.write('□');
+          }
+          if (col == 0) rowMarks.write(' | ');
         }
+        lines.add(
+          _debugLine(
+            "${row + 1}행: $rowMarks",
+            const Color(0xFFFFD180),
+          ),
+        );
       }
       lines.add(
         _debugLine(
-          "띠 수집(명령 3): $marks  $collectedCount/${bandCoverage.length}",
-          const Color(0xFFFFD180),
+          "칸 수집: $collectedCount/${cellCoverage.length}  (●수집  ■손가림  □대기)",
+          Colors.white54,
         ),
       );
-      lines.add(_debugLine("●수집됨  ■손가림  □대기", Colors.white54));
     }
 
     final ocr = ocrSummary;
@@ -446,11 +457,15 @@ class ScanCameraView extends StatelessWidget {
   }
 }
 
-/// 실시간으로 검출된 책 테두리 박스(정규화 Rect)와 그 안의 4분할선을 그린다.
+/// 검출된 책 테두리 박스(정규화 Rect)와 그 안의 8칸 격자(4행 × 2열)를 그린다.
+/// 박스 기준으로 4개의 가로 분할선과 가운데 세로 분할선을 그리고,
+/// 디버그 모드에서는 각 칸의 수집/손가림 상태를 음영으로 표시한다.
 class _BookBoxPainter extends CustomPainter {
-  _BookBoxPainter(this.bookBox);
+  _BookBoxPainter(this.bookBox, this.cellCoverage, this.cellCollected);
 
   final Rect? bookBox;
+  final List<bool> cellCoverage;
+  final List<bool> cellCollected;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -462,6 +477,34 @@ class _BookBoxPainter extends CustomPainter {
       box.right * size.width,
       box.bottom * size.height,
     );
+
+    // 8칸 음영 — 디버그 모드에서 cellCoverage/cellCollected가 채워졌을 때만.
+    if (cellCoverage.isNotEmpty) {
+      final rows = cellCoverage.length ~/ 2;
+      for (int i = 0; i < cellCoverage.length; i++) {
+        final row = i ~/ 2;
+        final col = i % 2;
+        final collected = i < cellCollected.length && cellCollected[i];
+        final covered = cellCoverage[i];
+        final Color? fill = collected
+            ? const Color(0x3369F0AE)
+            : (covered ? const Color(0x33FF5252) : null);
+        if (fill == null) continue;
+        final cell = Rect.fromLTRB(
+          rect.left + rect.width * col / 2,
+          rect.top + rect.height * row / rows,
+          rect.left + rect.width * (col + 1) / 2,
+          rect.top + rect.height * (row + 1) / rows,
+        );
+        canvas.drawRect(
+          cell,
+          Paint()
+            ..color = fill
+            ..style = PaintingStyle.fill,
+        );
+      }
+    }
+
     canvas.drawRect(
       rect,
       Paint()
@@ -469,41 +512,37 @@ class _BookBoxPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 3,
     );
-    // 박스 안 4분할 가로선.
+
     final divider = Paint()
       ..color = Colors.white.withValues(alpha: 0.5)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
+    // 박스 안 4분할 가로선.
     for (int i = 1; i < 4; i++) {
       final y = rect.top + rect.height * i / 4;
       canvas.drawLine(Offset(rect.left, y), Offset(rect.right, y), divider);
     }
+    // 박스 안 가운데 세로 분할선(좌/우 칸 구분).
+    final cx = rect.left + rect.width / 2;
+    canvas.drawLine(Offset(cx, rect.top), Offset(cx, rect.bottom), divider);
   }
 
   @override
   bool shouldRepaint(_BookBoxPainter oldDelegate) =>
-      oldDelegate.bookBox != bookBox;
+      oldDelegate.bookBox != bookBox ||
+      oldDelegate.cellCoverage != cellCoverage ||
+      oldDelegate.cellCollected != cellCollected;
 }
 
 /// 디버그 오버레이를 카메라 프리뷰 위에 그린다.
 /// 검출된 손은 초록, 추적 유지 중인 위치는 주황으로 표시하고,
-/// 명령 3의 가로 띠 경계선과 손이 덮은 띠(빨강 음영)를 나타낸다.
+/// 책등(좌우 페이지 분리) 세로선을 나타낸다.
 class _HandBoxPainter extends CustomPainter {
-  _HandBoxPainter(
-    this.boxes,
-    this.trackedBox,
-    this.spineX,
-    this.bandCount,
-    this.bandCoverage,
-    this.bandCollected,
-  );
+  _HandBoxPainter(this.boxes, this.trackedBox, this.spineX);
 
   final List<HandBox> boxes;
   final HandBox? trackedBox;
   final double spineX;
-  final int bandCount;
-  final List<bool> bandCoverage;
-  final List<bool> bandCollected;
 
   void _drawBox(Canvas canvas, Size size, HandBox box, Color color) {
     final stroke = Paint()
@@ -521,40 +560,7 @@ class _HandBoxPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 명령 3: 가로 띠 경계선 + 손이 덮은 띠 빨강 음영
-    if (bandCount > 0) {
-      final dividerPaint = Paint()
-        ..color = const Color(0x66FFFFFF)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1;
-      for (int i = 0; i < bandCount; i++) {
-        final bandTop = (i / bandCount) * size.height;
-        final bandBottom = ((i + 1) / bandCount) * size.height;
-        final collected = i < bandCollected.length && bandCollected[i];
-        final covered = i < bandCoverage.length && bandCoverage[i];
-        // 수집된 띠는 초록, 손이 가린 띠는 빨강 음영.
-        final Color? fill = collected
-            ? const Color(0x3369F0AE)
-            : (covered ? const Color(0x33FF5252) : null);
-        if (fill != null) {
-          canvas.drawRect(
-            Rect.fromLTRB(0, bandTop, size.width, bandBottom),
-            Paint()
-              ..color = fill
-              ..style = PaintingStyle.fill,
-          );
-        }
-        if (i > 0) {
-          canvas.drawLine(
-            Offset(0, bandTop),
-            Offset(size.width, bandTop),
-            dividerPaint,
-          );
-        }
-      }
-    }
-
-    // 명령 3: 책등(좌우 페이지 분리) 세로선
+    // 책등(좌우 페이지 분리) 세로선
     final spineXPix = spineX * size.width;
     canvas.drawLine(
       Offset(spineXPix, 0),
@@ -578,8 +584,5 @@ class _HandBoxPainter extends CustomPainter {
   bool shouldRepaint(_HandBoxPainter oldDelegate) =>
       oldDelegate.boxes != boxes ||
       oldDelegate.trackedBox != trackedBox ||
-      oldDelegate.spineX != spineX ||
-      oldDelegate.bandCount != bandCount ||
-      oldDelegate.bandCoverage != bandCoverage ||
-      oldDelegate.bandCollected != bandCollected;
+      oldDelegate.spineX != spineX;
 }
