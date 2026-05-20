@@ -38,7 +38,7 @@ class _ScanScreenState extends State<ScanScreen> {
   static const Duration _frameProcessingThrottle = Duration(milliseconds: 250);
   static const double _motionDiffThreshold = 12.0;
   static const int _lumaSampleCount = 64;
-  static const Duration _handDetectionThrottle = Duration(milliseconds: 700);
+  static const Duration _handDetectionThrottle = Duration(milliseconds: 200);
   // 촬영 직전 손 게이트가 신뢰할 손 감지 결과의 최대 허용 나이.
   static const Duration _handResultMaxAge = Duration(milliseconds: 1600);
   // 손 래치(추적 유지) 파라미터.
@@ -1440,7 +1440,7 @@ class _ScanScreenState extends State<ScanScreen> {
           _lastOcrFullText = pageText;
           _currentRecognizedPage = hit.rightNumber;
         });
-        _flashPageUpdate("중복 페이지 - OCR 수행X");
+        _flashPageUpdate("중복 페이지(${hit.rightNumber}P) - OCR 수행X");
       }
       return;
     }
@@ -2227,8 +2227,12 @@ $fullText
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // 상단 표시는 '방금 인식된' 페이지 — 분석 기록의 최댓값과 별개.
+    // 상단 표시:
+    //   · '현재 페이지' = 방금 인식된 페이지(literal, _currentRecognizedPage)
+    //   · '마지막으로 읽은 페이지' = 가장 멀리 읽은 페이지(max, book.currentPage)
+    final book = AppStateScope.of(context).findBookById(widget.bookId);
     final currentPage = _currentRecognizedPage;
+    final lastReadPage = book?.currentPage ?? 0;
 
     return Scaffold(
       backgroundColor: const Color(0xFFFDFBF7),
@@ -2256,6 +2260,14 @@ $fullText
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Text(
+                          "마지막으로 읽은 페이지: $lastReadPage P",
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            color: Color(0xFF455A64),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
                           widget.bookTitle,
                           style: const TextStyle(
                             fontSize: 18,
@@ -2264,7 +2276,7 @@ $fullText
                         ),
                         const SizedBox(width: 12),
                         Text(
-                          "현재 인식된 페이지: $currentPage P",
+                          "현재 페이지: $currentPage P",
                           style: const TextStyle(
                             fontSize: 13.5,
                             color: Colors.orange,

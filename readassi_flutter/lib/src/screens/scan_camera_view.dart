@@ -202,7 +202,9 @@ class ScanCameraView extends StatelessWidget {
             top: 8,
             left: 0,
             right: 0,
-            child: Center(child: _buildDebugPanel()),
+            child: Center(
+              child: _DebugPanelPositioner(child: _buildDebugPanel()),
+            ),
           ),
 
         if (isProcessing)
@@ -577,4 +579,34 @@ class _HandBoxPainter extends CustomPainter {
       oldDelegate.boxes != boxes ||
       oldDelegate.trackedBox != trackedBox ||
       oldDelegate.spineX != spineX;
+}
+
+/// 디버그 패널을 사용자가 터치 드래그로 옮길 수 있게 감싸는 위젯.
+/// 초기 위치는 부모(Positioned + Center)가 잡아주는 상단 중앙이고,
+/// Transform.translate로 누적 오프셋만 더해 화면 어디로든 옮길 수 있다.
+class _DebugPanelPositioner extends StatefulWidget {
+  final Widget child;
+  const _DebugPanelPositioner({required this.child});
+
+  @override
+  State<_DebugPanelPositioner> createState() => _DebugPanelPositionerState();
+}
+
+class _DebugPanelPositionerState extends State<_DebugPanelPositioner> {
+  Offset _offset = Offset.zero;
+
+  @override
+  Widget build(BuildContext context) {
+    return Transform.translate(
+      offset: _offset,
+      child: GestureDetector(
+        // 패널 빈 부분이 드래그를 받도록, 단 내부 버튼 onTap과는 제스처 아레나로 분리.
+        behavior: HitTestBehavior.translucent,
+        onPanUpdate: (details) {
+          setState(() => _offset += details.delta);
+        },
+        child: widget.child,
+      ),
+    );
+  }
 }
