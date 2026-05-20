@@ -161,10 +161,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   }
 
   Widget _buildTabContent(BuildContext context, Book book) {
-    final chatCardHeight = (MediaQuery.of(context).size.height * 0.26).clamp(
-      220.0,
-      280.0,
-    );
+    // 채팅 카드 — 화면 아래 빈 공간을 최대한 채우도록 크게 잡는다.
+    // 상단 영역(앱바·표지·탭) 합쳐 ~280px를 빼고 남은 높이를 쓴다.
+    final mediaHeight = MediaQuery.of(context).size.height;
+    final chatCardHeight = (mediaHeight - 280).clamp(380.0, 1200.0);
 
     switch (_activeTab) {
       case BookDetailTab.summary:

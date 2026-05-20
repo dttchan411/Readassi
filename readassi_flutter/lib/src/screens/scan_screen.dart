@@ -16,6 +16,7 @@ import '../app_state.dart';
 import '../models/book.dart';
 import '../services/book_box_detection_service.dart';
 import '../services/claude_service.dart';
+import '../services/demo_dashboard_service.dart';
 import '../services/hand_detection_service.dart';
 import 'book_detail_screen.dart';
 import 'scan_camera_view.dart';
@@ -79,6 +80,9 @@ class _ScanScreenState extends State<ScanScreen> {
   final ClaudeService _claudeService = ClaudeService();
   final HandDetectionService _handDetectionService = HandDetectionService();
   final BookBoxDetectionService _bookBoxService = BookBoxDetectionService();
+  // 발표 데모용 실시간 대시보드 — 같은 네트워크 노트북 브라우저에서 8칸 상태 본다.
+  // static으로 두어 스캔 화면을 떠나도 서버가 죽지 않게 한다(앱 수명 동안 유지).
+  static final DemoDashboardService _dashboard = DemoDashboardService();
 
   bool _isAutoMode = false;
   bool _isImageStreamActive = false;
@@ -173,6 +177,8 @@ class _ScanScreenState extends State<ScanScreen> {
   void dispose() {
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     _pageUpdateTimer?.cancel();
+    // 대시보드는 static이라 화면 떠나도 서버 유지(앱 수명 동안).
+    // 데모/디버그용이라 명시적 종료는 안 함 — 프로세스 종료 시 자연히 정리.
     _controller?.dispose();
     super.dispose();
   }
@@ -221,6 +227,9 @@ class _ScanScreenState extends State<ScanScreen> {
       // 캡처 로직은 _isAutoMode일 때만 발동한다. 촬영 시작 누를 때 손 위치를
       // 이미 알고 있어 책 박스 검출에 즉시 사용 가능.
       await _ensureImageStreamRunning();
+
+      // 발표 데모용 외부 대시보드 시작(같은 Wi-Fi 노트북에서 URL로 접속).
+      await _dashboard.start();
     } catch (e) {
       debugPrint("카메라 에러: $e");
     }
@@ -436,6 +445,8 @@ class _ScanScreenState extends State<ScanScreen> {
       // 손 래치(추적 유지)도 그대로 — 현재 카메라 상태를 반영.
       _resetBandCollection();
     });
+    // 새 세션 시작 — 외부 대시보드도 빈 칸으로 초기화.
+    _dashboard.reset();
 
     // 촬영 시작 시 사진 한 장으로 책 테두리 박스를 1회 검출한다.
     await _detectBookBoxOnce();
@@ -958,7 +969,18 @@ class _ScanScreenState extends State<ScanScreen> {
     ];
   }
 
+  // 셀 OCR 결과(_VisionLine 리스트)를 표시용 텍스트로 합친다(대시보드 등에 사용).
+  String _cellText(List<_VisionLine> lines) {
+    return lines
+        .map((l) => l.text.trim())
+        .where((t) => t.isNotEmpty)
+        .join('\n');
+  }
+
   // 명령 3: 셀 수집 상태를 초기화한다(새 페이지 시작/완성/전체촬영 시).
+  // 대시보드는 *동기화하지 않는다* — 페이지가 완성된 뒤에도 결과를 계속 보여줘야 하고,
+  // 다음 페이지의 새 이미지가 푸시될 때 자연히 칸별로 덮어쓰임. 명시적 reset은
+  // 새 세션 시작(_startAutoCapture) 시점에만 한다.
   void _resetBandCollection() {
     for (int i = 0; i < _cellLines.length; i++) {
       _cellLines[i] = null;
@@ -1038,6 +1060,8 @@ class _ScanScreenState extends State<ScanScreen> {
         box.left,
         spine,
       );
+      // 대시보드: 좌상단 캡처 이미지를 일단 표시(OCR 끝나면 텍스트로 교체됨).
+      _dashboard.pushImage(0, topLeftCrop);
       final topLeftLines = await _ocrLines(topLeftCrop);
       final currentFp = _buildFingerprintLines(topLeftLines, const []);
 
@@ -1079,6 +1103,8 @@ class _ScanScreenState extends State<ScanScreen> {
       if (stored == null || (stored.isEmpty && topLeftLines.isNotEmpty)) {
         _cellLines[0] = topLeftLines;
       }
+      // 대시보드: 좌상단 이미지를 OCR 텍스트로 교체.
+      _dashboard.pushText(0, _cellText(topLeftLines));
 
       // ── ② 나머지 깨끗한 칸은 이미지로만 저장(OCR 지연) ──────────────
       for (int row = 0; row < _bandCount; row++) {
@@ -1094,13 +1120,16 @@ class _ScanScreenState extends State<ScanScreen> {
           if (coverage[idx]) continue;
           final left = col == 0 ? box.left : spine;
           final right = col == 0 ? spine : box.right;
-          _pendingCellImages[idx] = _cropEncode(
+          final crop = _cropEncode(
             oriented,
             cropTop,
             cropBottom,
             left,
             right,
           );
+          _pendingCellImages[idx] = crop;
+          // 대시보드: 새로 수집된 칸의 이미지를 즉시 표시.
+          _dashboard.pushImage(idx, crop);
         }
       }
 
@@ -1130,6 +1159,8 @@ class _ScanScreenState extends State<ScanScreen> {
           for (int k = 0; k < pendingIdxs.length; k++) {
             _cellLines[pendingIdxs[k]] = results[k];
             _pendingCellImages[pendingIdxs[k]] = null;
+            // 대시보드: 이미지였던 칸을 OCR 텍스트로 교체.
+            _dashboard.pushText(pendingIdxs[k], _cellText(results[k]));
           }
         }
         await _assembleAndSaveBands();

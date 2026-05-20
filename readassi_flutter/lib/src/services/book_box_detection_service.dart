@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' show Rect;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
 /// 촬영 시작 시 찍은 사진 한 장에서 책(펼침면) 영역의 바운딩 박스를 1회 검출한다.
@@ -26,7 +27,9 @@ class BookBoxDetectionService {
   static const double _minSpreadAspect = 0.95;
 
   /// 사진 파일 경로에서 책 박스를 정규화 좌표(0~1)로 돌려준다. 못 찾으면 null.
-  Rect? detect(String imagePath) {
+  /// [excludeRegions]에 손 박스 등을 주면, 엣지 단계에서 그 영역을 통째로
+  /// 지워 그 안에는 contour가 생기지 않게 한다(손이 박스에 끼이는 걸 막음).
+  Rect? detect(String imagePath, {List<Rect>? excludeRegions}) {
     cv.Mat? gray;
     cv.Mat? resized;
     cv.Mat? blurred;
@@ -61,6 +64,27 @@ class BookBoxDetectionService {
       final bridgeW = (tw / 15).round().clamp(25, 90);
       bridgeKernel = cv.getStructuringElement(0, (bridgeW, 5));
       bridged = cv.morphologyEx(dilated, 3 /* MORPH_CLOSE */, bridgeKernel);
+
+      // 손 영역(있다면) 엣지를 통째로 0으로 지워 contour가 생기지 않게 한다.
+      // 모든 morphology 이후에 지워, 인접 책 엣지가 손 영역으로 늘어나는 것까지 차단.
+      if (excludeRegions != null && excludeRegions.isNotEmpty) {
+        const int margin = 12; // 손 가장자리(반그림자)까지 여유 있게 지움
+        for (final region in excludeRegions) {
+          final x1 = ((region.left * tw).round() - margin).clamp(0, tw - 1);
+          final y1 = ((region.top * th).round() - margin).clamp(0, th - 1);
+          final x2 = ((region.right * tw).round() + margin).clamp(x1 + 1, tw);
+          final y2 = ((region.bottom * th).round() + margin).clamp(y1 + 1, th);
+          cv.rectangle(
+            bridged,
+            cv.Rect(x1, y1, x2 - x1, y2 - y1),
+            cv.Scalar.all(0),
+            thickness: -1,
+          );
+        }
+        debugPrint(
+          "손 영역 ${excludeRegions.length}개 엣지 제거 — 다운스케일 ${tw}x$th 기준",
+        );
+      }
 
       // RETR_EXTERNAL(0): 가장 바깥 윤곽만. CHAIN_APPROX_SIMPLE(2).
       final found = cv.findContours(bridged, 0, 2);
@@ -140,60 +164,14 @@ class BookBoxDetectionService {
     }
   }
 
-  /// 손 박스(정규화 Rect, 0~1)들의 영역을 인페인팅으로 가린 뒤 책 박스를 검출한다.
-  /// 손이 만들던 엣지가 사라져 박스가 손 따라 늘어나지 않는다.
+  /// 손 박스(정규화 Rect, 0~1)들의 영역에서 엣지를 통째로 지운 뒤 책 박스를
+  /// 검출한다. 손이 만든 엣지/contour가 사라져 책 박스가 손 따라 늘어나지 않는다.
+  /// (cv.inpaint 없이도 동일한 효과 — opencv_dart 안드로이드 빌드에 inpaint
+  /// 심볼이 빠져 있어 이 방식으로 우회.)
   /// [handRegions]가 비면 그대로 [detect]를 호출한다.
   Rect? detectWithHandMask(String imagePath, List<Rect> handRegions) {
     if (handRegions.isEmpty) return detect(imagePath);
-
-    cv.Mat? src;
-    cv.Mat? mask;
-    cv.Mat? dKernel;
-    cv.Mat? dilatedMask;
-    cv.Mat? inpainted;
-    try {
-      src = cv.imread(imagePath, flags: cv.IMREAD_COLOR);
-      if (src.isEmpty) return detect(imagePath);
-
-      final w = src.cols;
-      final h = src.rows;
-
-      // 단일채널(CV_8UC1=0) 검은 마스크. 손 박스 영역을 흰색(255)으로 채운다.
-      mask = cv.Mat.zeros(h, w, cv.MatType.CV_8UC1);
-      for (final region in handRegions) {
-        final x1 = (region.left * w).round().clamp(0, w - 1);
-        final y1 = (region.top * h).round().clamp(0, h - 1);
-        final x2 = (region.right * w).round().clamp(x1 + 1, w);
-        final y2 = (region.bottom * h).round().clamp(y1 + 1, h);
-        cv.rectangle(
-          mask,
-          cv.Rect(x1, y1, x2 - x1, y2 - y1),
-          cv.Scalar.all(255),
-          thickness: -1,
-        );
-      }
-
-      // 마스크를 약간 부풀려 손 가장자리(반그림자) 픽셀까지 인페인트 대상으로.
-      dKernel = cv.getStructuringElement(0 /* MORPH_RECT */, (15, 15));
-      dilatedMask = cv.dilate(mask, dKernel, iterations: 1);
-
-      // 주변 픽셀로 채워 손을 지운다(TELEA=1, 반경 5px).
-      inpainted = cv.inpaint(src, dilatedMask, 5, 1);
-
-      // 인페인팅 결과를 임시 파일에 저장하고 기존 알고리즘으로 책 박스 검출.
-      final tempPath = '$imagePath.inpainted.jpg';
-      cv.imwrite(tempPath, inpainted);
-      return detect(tempPath);
-    } catch (e) {
-      // 인페인팅 실패 시 원본으로 폴백.
-      return detect(imagePath);
-    } finally {
-      src?.dispose();
-      mask?.dispose();
-      dKernel?.dispose();
-      dilatedMask?.dispose();
-      inpainted?.dispose();
-    }
+    return detect(imagePath, excludeRegions: handRegions);
   }
 
   /// 두 바운딩 박스 [a], [b]([l,t,r,b])를 합칠지 판정한다.
