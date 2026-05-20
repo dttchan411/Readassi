@@ -215,6 +215,12 @@ class _ScanScreenState extends State<ScanScreen> {
 
       if (!mounted) return;
       setState(() => _isCameraInitialized = true);
+
+      // 카메라가 켜진 순간부터 손 추적이 돌도록 스트림을 곧장 시작한다.
+      // _handleCameraImage가 _isAutoMode와 무관하게 손 검출만 항상 수행하고,
+      // 캡처 로직은 _isAutoMode일 때만 발동한다. 촬영 시작 누를 때 손 위치를
+      // 이미 알고 있어 책 박스 검출에 즉시 사용 가능.
+      await _ensureImageStreamRunning();
     } catch (e) {
       debugPrint("카메라 에러: $e");
     }
@@ -421,17 +427,13 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastCaptureAt = null;
       _lastFrameProcessedAt = null;
       _lastFrameSignature = null;
-      _lastHandDetectionAt = null;
-      _handResult = null;
-      _handResultAt = null;
+      // 손 추적은 카메라 켜진 동안 항상 돌고 있다 — 촬영 시작 직후 인페인팅에
+      // 그 결과(_handResult)를 즉시 써야 하므로 여기서 *지우지 않는다*.
+      // _lastHandDetectionAt도 그대로 두어 throttle이 자연스럽게 이어진다.
       _bookBox = null;
       _captureStatus = _CaptureStatus.motion;
       _lastOcrFullText = null;
-      _handLatched = false;
-      _lastHandBox = null;
-      _lastHandSeenAt = null;
-      _lastHandArea = 0;
-      _peakHandArea = 0;
+      // 손 래치(추적 유지)도 그대로 — 현재 카메라 상태를 반영.
       _resetBandCollection();
     });
 
@@ -442,17 +444,40 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // 촬영 시작 시 사진 한 장으로 책 테두리 박스를 1회 검출해 세션 내내 고정한다.
+  // 손 추적은 카메라가 켜진 순간부터 백그라운드로 돌고 있으므로 _handResult가
+  // 이미 채워져 있다(없으면 손이 그 시점에 안 보인 것). 그 손 위치를 인페인팅에
+  // 사용해 박스가 손 따라 늘어나는 걸 막는다.
   Future<void> _detectBookBoxOnce() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     try {
+      // ① 백그라운드 손 추적의 최신 결과를 그대로 사용.
+      final handBoxes = _handResult?.boxes ?? const <HandBox>[];
+      final handRegions = handBoxes
+          .map((b) => Rect.fromLTRB(b.left, b.top, b.right, b.bottom))
+          .toList();
+
+      // ② takePicture는 스트림이 멈춰 있어야 하므로 잠깐 멈춤.
+      final wasStreaming = _isImageStreamActive;
+      if (wasStreaming) {
+        await _stopImageStream();
+      }
       final photo = await _controller!.takePicture();
-      final box = _bookBoxService.detect(photo.path);
+      if (wasStreaming && mounted) {
+        await _ensureImageStreamRunning();
+      }
+
+      // ③ 손 영역 인페인팅 후 기존 알고리즘으로 책 박스 검출.
+      final box = _bookBoxService.detectWithHandMask(photo.path, handRegions);
+
       if (!mounted) return;
       setState(() => _bookBox = box);
       if (box == null) {
         debugPrint("책 테두리를 찾지 못했습니다.");
       } else {
-        debugPrint("책 테두리 박스 검출 완료: $box");
+        debugPrint(
+          "책 테두리 박스 검출 완료: $box "
+          "(손 박스 ${handRegions.length}개 인페인팅)",
+        );
       }
     } catch (e) {
       debugPrint("책 박스 검출 오류: $e");
@@ -562,7 +587,8 @@ class _ScanScreenState extends State<ScanScreen> {
   Future<void> _stopAutoCapture() async {
     if (!_isAutoMode) return;
 
-    await _stopImageStream();
+    // 스트림은 그대로 유지(손 추적은 카메라 켜진 동안 항상 돌게 함).
+    // 자동 캡처 로직만 비활성화.
 
     setState(() {
       _isAutoMode = false;
@@ -607,12 +633,14 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Future<void> _handleCameraImage(CameraImage image) async {
-    if (!_isAutoMode || _isCaptureBusy || _isProcessingAnalysis) return;
-
     final now = DateTime.now();
 
-    // 손 감지는 디버그 토글과 무관하게 촬영 중 항상 실행한다(촬영 게이트가 사용).
+    // 손 감지는 카메라가 켜져 있는 동안 *항상* 실행한다(촬영 시작 전에도).
+    // 그래야 촬영 시작 시점에 손 위치를 즉시 알 수 있어 책 박스 검출에 활용.
     _maybeRunHandDetection(image, now);
+
+    // 캡처/움직임 로직은 자동 촬영 모드에서만.
+    if (!_isAutoMode || _isCaptureBusy || _isProcessingAnalysis) return;
 
     if (_lastFrameProcessedAt != null &&
         now.difference(_lastFrameProcessedAt!) < _frameProcessingThrottle) {

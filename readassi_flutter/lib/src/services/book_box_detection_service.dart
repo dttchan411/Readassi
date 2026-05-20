@@ -140,6 +140,62 @@ class BookBoxDetectionService {
     }
   }
 
+  /// 손 박스(정규화 Rect, 0~1)들의 영역을 인페인팅으로 가린 뒤 책 박스를 검출한다.
+  /// 손이 만들던 엣지가 사라져 박스가 손 따라 늘어나지 않는다.
+  /// [handRegions]가 비면 그대로 [detect]를 호출한다.
+  Rect? detectWithHandMask(String imagePath, List<Rect> handRegions) {
+    if (handRegions.isEmpty) return detect(imagePath);
+
+    cv.Mat? src;
+    cv.Mat? mask;
+    cv.Mat? dKernel;
+    cv.Mat? dilatedMask;
+    cv.Mat? inpainted;
+    try {
+      src = cv.imread(imagePath, flags: cv.IMREAD_COLOR);
+      if (src.isEmpty) return detect(imagePath);
+
+      final w = src.cols;
+      final h = src.rows;
+
+      // 단일채널(CV_8UC1=0) 검은 마스크. 손 박스 영역을 흰색(255)으로 채운다.
+      mask = cv.Mat.zeros(h, w, cv.MatType.CV_8UC1);
+      for (final region in handRegions) {
+        final x1 = (region.left * w).round().clamp(0, w - 1);
+        final y1 = (region.top * h).round().clamp(0, h - 1);
+        final x2 = (region.right * w).round().clamp(x1 + 1, w);
+        final y2 = (region.bottom * h).round().clamp(y1 + 1, h);
+        cv.rectangle(
+          mask,
+          cv.Rect(x1, y1, x2 - x1, y2 - y1),
+          cv.Scalar.all(255),
+          thickness: -1,
+        );
+      }
+
+      // 마스크를 약간 부풀려 손 가장자리(반그림자) 픽셀까지 인페인트 대상으로.
+      dKernel = cv.getStructuringElement(0 /* MORPH_RECT */, (15, 15));
+      dilatedMask = cv.dilate(mask, dKernel, iterations: 1);
+
+      // 주변 픽셀로 채워 손을 지운다(TELEA=1, 반경 5px).
+      inpainted = cv.inpaint(src, dilatedMask, 5, 1);
+
+      // 인페인팅 결과를 임시 파일에 저장하고 기존 알고리즘으로 책 박스 검출.
+      final tempPath = '$imagePath.inpainted.jpg';
+      cv.imwrite(tempPath, inpainted);
+      return detect(tempPath);
+    } catch (e) {
+      // 인페인팅 실패 시 원본으로 폴백.
+      return detect(imagePath);
+    } finally {
+      src?.dispose();
+      mask?.dispose();
+      dKernel?.dispose();
+      dilatedMask?.dispose();
+      inpainted?.dispose();
+    }
+  }
+
   /// 두 바운딩 박스 [a], [b]([l,t,r,b])를 합칠지 판정한다.
   /// 세로로 충분히 겹치고(같은 행) 가로로 인접/겹치면(간격 ≤ [maxGap]) true.
   bool _shouldMerge(List<int> a, List<int> b, double maxGap) {
