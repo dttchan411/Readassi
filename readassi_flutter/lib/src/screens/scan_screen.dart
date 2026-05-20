@@ -1081,6 +1081,29 @@ class _ScanScreenState extends State<ScanScreen> {
         if (currentFp.length >= _fingerprintLineCount) {
           final stored = _matchStoredPage(currentFp);
           if (stored != null) {
+            // 데모용: 재독이라 OCR은 생략하지만 셀 이미지 자체는 대시보드에
+            // 푸시해서 시각화가 끊기지 않게 한다(추가 Vision API 호출 0건).
+            _dashboard.pushText(0, _cellText(topLeftLines));
+            for (int row = 0; row < _bandCount; row++) {
+              final (bandTop, bandBottom) = _bandBounds(row);
+              final cropTop = bandTop - overlap;
+              final cropBottom = bandBottom + overlap;
+              for (int col = 0; col < 2; col++) {
+                final idx = row * 2 + col;
+                if (idx == 0) continue; // 좌상단은 위에서 이미 푸시됨
+                if (coverage[idx]) continue; // 손에 가려진 칸은 스킵
+                final left = col == 0 ? box.left : spine;
+                final right = col == 0 ? spine : box.right;
+                final crop = _cropEncode(
+                  oriented,
+                  cropTop,
+                  cropBottom,
+                  left,
+                  right,
+                );
+                _dashboard.pushImage(idx, crop);
+              }
+            }
             _handleProbeReread(stored);
             _resetBandCollection();
             if (mounted && _isAutoMode) {
@@ -1617,14 +1640,17 @@ class _ScanScreenState extends State<ScanScreen> {
   // 그래서 ① 본문 문단(어절 많은 긴 줄)과 ② 'N .' 코드 줄번호 줄을 걸러낸 뒤,
   // 남은 짧은 푸터 줄들의 숫자 중 가장 큰 값을 페이지 번호로 본다. 장·절 번호
   // (4-3 등)는 작아서 자연히 밀린다. 기대값에 의존하지 않아 페이지 점프에 강하다.
-  int? _extractBottomPageNumber(List<_VisionLine> lines) {
-    if (lines.isEmpty) return null;
+  // 하단 영역에서 발견된 *모든* 페이지 번호 후보 숫자를 돌려준다(중복 제거·정렬).
+  // 최대값 하나만 뽑던 기존 방식과 달리, 다중 후보를 _resolvePageNumbers가
+  // 연속쌍 검사·앵커 근접도로 가려내게 한다.
+  List<int> _extractBottomPageCandidates(List<_VisionLine> lines) {
+    if (lines.isEmpty) return const [];
     final bottom = lines.sublist(
       math.max(0, lines.length - _pageNumberSearchLines),
     );
     final codeLineNumber = RegExp(r'^\d{1,3}\s*\.\s*$'); // 'N .' 코드 줄번호
     final number = RegExp(r'\d{1,4}');
-    int? best;
+    final cands = <int>{};
     for (final line in bottom) {
       final text = line.text.trim();
       if (text.isEmpty || codeLineNumber.hasMatch(text)) continue;
@@ -1635,38 +1661,26 @@ class _ScanScreenState extends State<ScanScreen> {
       if (tokenCount > _pageNumberMaxTokens) continue; // 본문 문단 줄 제외
       for (final m in number.allMatches(text)) {
         final n = int.parse(m.group(0)!);
-        if (best == null || n > best) best = n;
+        if (n > 0 && n < 10000) cands.add(n);
       }
     }
-    return best;
+    final list = cands.toList()..sort();
+    return list;
   }
 
   // ── 페이지 번호 확정 ──────────────────────────────────────────────
-  // ① 베이스라인: OCR을 기본 신뢰(예전 단순 보정 — 비연속이면 큰 쪽 신뢰,
-  //    한쪽만 있으면 인접번호 유도, 둘 다 없으면 앵커+1·+2 폴백).
-  // ② 방어: 결과가 기대값에서 '갑자기 점프'했거나 패리티 락을 어기면,
-  //    혼동쌍 스왑을 모든 조합으로 시도해 기대값과 *정확히 일치*하면 오인으로
-  //    보고 기대값으로 교정. 패리티 락 위반인데 스왑도 안 맞으면 기대값 강제.
-  // ③ 패리티 학습: 깨끗한 reading(둘 다 OCR + 연속)이 같은 패리티로 연속
-  //    _parityLockMinVotes회 나오면 락. 락이 잡히면 이후 위반은 ②가 보정.
+  // 좌·우 페이지 하단에서 후보 숫자들을 모두 수집한 뒤, 카운트별 결정 트리:
+  //   · N=0 : 앵커+1, +2 폴백
+  //   · N=1 : 앵커 근방이면 채택+짝 유도, 아니면 폴백
+  //   · N=2 : 연속쌍이면 채택, 아니면 앵커와 일치하는 쪽 채택, 아니면 폴백
+  //   · N≥3 : 연속쌍 우선(여럿이면 앵커 매치/근접도로 깸), 없으면 폴백
+  // 페이지 번호의 본질적 속성(좌·우는 항상 n, n+1)을 직접 활용해 본문/각주의
+  // 잡음 숫자를 자연스럽게 거른다.
 
-  // "갑자기 점프"로 볼 기대값 대비 최소 차이(페이지 수).
-  static const int _suddenJumpThreshold = 5;
   // 패리티 락에 필요한 연속 일치 횟수.
   static const int _parityLockMinVotes = 5;
-
-  // OCR이 인쇄체에서 자주 헷갈리는 숫자 쌍.
-  static const Map<int, List<int>> _digitConfusions = {
-    0: [6, 8],
-    1: [4, 7],
-    3: [8, 9],
-    4: [1, 9],
-    5: [6, 8],
-    6: [0, 5, 8],
-    7: [1, 9],
-    8: [0, 3, 5, 6],
-    9: [3, 4, 7],
-  };
+  // N==1, N==2에서 후보가 '앵커 근방'인지 볼 허용 오차.
+  static const int _pageAnchorTolerance = 3;
 
   // 페이지 패리티 락 상태(이 책의 펼침면이 짝-홀인지 홀-짝인지).
   _PageParity? _parityLock;
@@ -1676,54 +1690,6 @@ class _ScanScreenState extends State<ScanScreen> {
   _PageParity _parityOf(int left) =>
       left.isEven ? _PageParity.evenOdd : _PageParity.oddEven;
 
-  // 한 자릿수에서 OCR이 헷갈릴 수 있는 후보들(자기 자신 포함).
-  List<int> _digitVariants(int digit) {
-    return [digit, ...(_digitConfusions[digit] ?? const [])];
-  }
-
-  // [n]의 자릿수마다 혼동쌍 치환을 곱집합으로 펼친 모든 변형 숫자.
-  Set<int> _numberSwapVariants(int n) {
-    if (n < 0) return {n};
-    final digits = n
-        .toString()
-        .split('')
-        .map((c) => _digitVariants(int.parse(c)))
-        .toList();
-    final out = <int>{};
-    void recurse(int idx, String acc) {
-      if (idx == digits.length) {
-        out.add(int.parse(acc));
-        return;
-      }
-      for (final d in digits[idx]) {
-        recurse(idx + 1, '$acc$d');
-      }
-    }
-    recurse(0, '');
-    return out;
-  }
-
-  // 좌·우 OCR값을 혼동쌍 스왑으로 (expLeft, expRight)에 정확히 도달할 수 있나.
-  // 둘 다 있으면 둘 다, 하나만 있으면 그쪽만 일치하면 된다.
-  bool _canCorrectViaSwap(
-    int? rawLeft,
-    int? rawRight,
-    int expLeft,
-    int expRight,
-  ) {
-    if (rawLeft != null && rawRight != null) {
-      return _numberSwapVariants(rawLeft).contains(expLeft) &&
-          _numberSwapVariants(rawRight).contains(expRight);
-    }
-    if (rawLeft != null) {
-      return _numberSwapVariants(rawLeft).contains(expLeft);
-    }
-    if (rawRight != null) {
-      return _numberSwapVariants(rawRight).contains(expRight);
-    }
-    return false;
-  }
-
   // 앵커(_lastCommittedRight)를 전진시킨다 — 뒤로 돌아간 곁다리가 앵커를
   // 끌어내리지 않도록 max로만 갱신한다.
   void _advanceAnchor(int right) {
@@ -1732,7 +1698,7 @@ class _ScanScreenState extends State<ScanScreen> {
         : math.max(_lastCommittedRight!, right);
   }
 
-  // 패리티 학습 — 깨끗한 reading일 때만 카운트, 연속 N회면 락.
+  // 패리티 학습 — 깨끗한(연속쌍 + 앵커 근방=confirmed) reading일 때만 카운트.
   void _learnParity(int left) {
     if (_parityLock != null) return; // 이미 락된 책은 학습 안 함
     final p = _parityOf(left);
@@ -1750,74 +1716,166 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
+  bool _isNearAnchor(int v, int expected) =>
+      (v - expected).abs() <= _pageAnchorTolerance;
+
+  // v 한 값에서 좌·우 짝 유도. v가 좌(expectedL)에 더 가까우면 (v, v+1),
+  // 우(expectedR)에 더 가까우면 (v-1, v)로.
+  ({int left, int right, bool confirmed}) _derivePairFromOne(
+    int v,
+    int expectedL,
+    int expectedR,
+  ) {
+    final distL = (v - expectedL).abs();
+    final distR = (v - expectedR).abs();
+    return distL <= distR
+        ? (left: v, right: v + 1, confirmed: true)
+        : (left: v - 1, right: v, confirmed: true);
+  }
+
+  // 정렬된 후보 리스트에서 연속쌍 (n, n+1)을 모두 찾고, 그중 앵커와 가장
+  // 잘 맞는 쌍을 돌려준다. 연속쌍이 하나도 없으면 null.
+  ({int left, int right, bool confirmed})? _findBestConsecutivePair(
+    List<int> sorted,
+    int expectedL,
+    int expectedR,
+  ) {
+    final set = sorted.toSet();
+    final pairs = <(int, int)>[];
+    for (final v in sorted) {
+      if (set.contains(v + 1)) pairs.add((v, v + 1));
+    }
+    if (pairs.isEmpty) return null;
+    // 1순위 — 기대값과 정확히 일치하는 쌍
+    for (final p in pairs) {
+      if (p.$1 == expectedL && p.$2 == expectedR) {
+        return (left: p.$1, right: p.$2, confirmed: true);
+      }
+    }
+    // 2순위 — 기대값과 가장 가까운 쌍
+    pairs.sort((a, b) =>
+        (a.$1 - expectedL).abs().compareTo((b.$1 - expectedL).abs()));
+    final best = pairs.first;
+    final near = _isNearAnchor(best.$2, expectedR);
+    return (left: best.$1, right: best.$2, confirmed: near);
+  }
+
+  // 앵커 없음(부트스트랩, 첫 페이지) 경로.
+  ({int left, int right, bool confirmed}) _resolveBootstrap(
+    List<int> leftCands,
+    List<int> rightCands,
+    List<int> all,
+  ) {
+    if (all.isEmpty) return (left: 1, right: 2, confirmed: false);
+    // 좌·우 교차 연속쌍 우선(좌에 l, 우에 l+1 동시 존재).
+    for (final l in leftCands) {
+      if (rightCands.contains(l + 1)) {
+        return (left: l, right: l + 1, confirmed: true);
+      }
+    }
+    // 합집합 내 연속쌍.
+    for (int i = 0; i < all.length - 1; i++) {
+      if (all[i + 1] == all[i] + 1) {
+        return (left: all[i], right: all[i] + 1, confirmed: true);
+      }
+    }
+    // 단일/다중 비연속 — 가장 큰 값 기준으로 짝 유도.
+    final m = all.last;
+    final l = m > 1 ? m - 1 : m;
+    final r = m > 1 ? m : m + 1;
+    return (left: l, right: r, confirmed: true);
+  }
+
   // 한 펼침면의 좌·우 페이지 번호를 확정한다.
-  // confirmed=false면 OCR을 그대로 안 쓰고 추정/방어 교정된 결과다.
+  // confirmed=false면 OCR을 그대로 안 쓰고 앵커/추정으로 폴백한 결과다.
   ({int left, int right, bool confirmed}) _resolvePageNumbers(
     List<_VisionLine> leftLines,
     List<_VisionLine> rightLines,
   ) {
-    final rawLeft = _extractBottomPageNumber(leftLines);
-    final rawRight = _extractBottomPageNumber(rightLines);
+    final leftCands = _extractBottomPageCandidates(leftLines);
+    final rightCands = _extractBottomPageCandidates(rightLines);
+    final all = ({...leftCands, ...rightCands}).toList()..sort();
     final anchor = _lastCommittedRight;
 
-    // ① 베이스라인 — OCR 신뢰(예전 방식).
-    int? l = rawLeft;
-    int? r = rawRight;
-    bool confirmed = rawLeft != null || rawRight != null;
+    debugPrint(
+      "페이지 번호 후보 좌=$leftCands 우=$rightCands "
+      "(합=$all, 앵커=${anchor ?? '-'})",
+    );
 
-    if (l != null && r != null && r != l + 1) {
-      // 비연속 — 더 큰 쪽을 진실로 보고 다른 쪽을 ±1로 보정.
-      if (l >= r) {
-        r = l + 1;
-      } else {
-        l = r - 1;
+    final result = _decidePageNumbers(leftCands, rightCands, all, anchor);
+
+    // 패리티 학습 — 연속쌍이면서 confirmed일 때만 카운트한다(잡음 차단).
+    if (result.confirmed && result.right == result.left + 1) {
+      _learnParity(result.left);
+    }
+
+    debugPrint(
+      "페이지 번호 확정: ${result.left}·${result.right} "
+      "(confirmed=${result.confirmed})",
+    );
+    return result;
+  }
+
+  ({int left, int right, bool confirmed}) _decidePageNumbers(
+    List<int> leftCands,
+    List<int> rightCands,
+    List<int> all,
+    int? anchor,
+  ) {
+    if (anchor == null) return _resolveBootstrap(leftCands, rightCands, all);
+
+    final expectedL = anchor + 1;
+    final expectedR = anchor + 2;
+
+    // N == 0 : 앵커 폴백.
+    if (all.isEmpty) {
+      debugPrint("페이지 번호 후보 0개 → 앵커 폴백");
+      return (left: expectedL, right: expectedR, confirmed: false);
+    }
+
+    // N >= 3 : 연속쌍 우선(여럿이면 앵커 매치·근접도로 깸).
+    if (all.length >= 3) {
+      final pair = _findBestConsecutivePair(all, expectedL, expectedR);
+      if (pair != null) {
+        debugPrint("페이지 번호 N≥3 연속쌍 채택: ${pair.left}·${pair.right}");
+        return pair;
       }
-    }
-    if (l == null && r == null) {
-      l = anchor != null ? anchor + 1 : 1;
-      r = anchor != null ? anchor + 2 : 2;
-    } else {
-      l ??= r! - 1;
-      r ??= l + 1;
+      debugPrint("페이지 번호 N≥3 연속쌍 없음 → 앵커 폴백");
+      return (left: expectedL, right: expectedR, confirmed: false);
     }
 
-    // ② 방어 — 갑작스러운 점프 or 패리티 락 위반이면 스왑-검산 시도.
-    if (anchor != null) {
-      final expLeft = anchor + 1;
-      final expRight = anchor + 2;
-      final sudden = (r - expRight).abs() > _suddenJumpThreshold;
-      final parityViolates =
-          _parityLock != null && _parityOf(l) != _parityLock;
-      if (sudden || parityViolates) {
-        if (_canCorrectViaSwap(rawLeft, rawRight, expLeft, expRight)) {
+    // N == 2 : 연속쌍이면 채택, 아니면 앵커 매치 시도.
+    if (all.length == 2) {
+      if (all[1] == all[0] + 1) {
+        final near = _isNearAnchor(all[1], expectedR);
+        debugPrint(
+          "페이지 번호 N=2 연속쌍 (${all[0]}, ${all[1]}) "
+          "${near ? '앵커 근방' : '점프'} 채택",
+        );
+        return (left: all[0], right: all[1], confirmed: near);
+      }
+      for (final v in all) {
+        if (_isNearAnchor(v, expectedL) || _isNearAnchor(v, expectedR)) {
+          final pair = _derivePairFromOne(v, expectedL, expectedR);
           debugPrint(
-            "혼동쌍 스왑 교정: $rawLeft|$rawRight → $expLeft|$expRight",
+            "페이지 번호 N=2 비연속, $v 앵커 근방 → ${pair.left}·${pair.right}",
           );
-          l = expLeft;
-          r = expRight;
-          confirmed = false;
-        } else if (parityViolates) {
-          // 락 위반인데 스왑으로도 일치 안 함 — 락을 우선해 기대값 강제.
-          debugPrint(
-            "패리티 락 위반(스왑 실패): $rawLeft|$rawRight → $expLeft|$expRight",
-          );
-          l = expLeft;
-          r = expRight;
-          confirmed = false;
+          return pair;
         }
-        // sudden만이고 스왑도 안 맞으면 → 진짜 점프 후보로 보고 그대로 둔다.
       }
+      debugPrint("페이지 번호 N=2 비연속·앵커 매치 없음 → 앵커 폴백");
+      return (left: expectedL, right: expectedR, confirmed: false);
     }
 
-    // ③ 패리티 학습 — 깨끗한(둘 다 OCR + 연속) 베이스라인에만 표 한 장.
-    if (confirmed &&
-        rawLeft != null &&
-        rawRight != null &&
-        rawRight == rawLeft + 1) {
-      _learnParity(l);
+    // N == 1 : 앵커 근방이면 채택+짝 유도, 아니면 폴백.
+    final v = all.first;
+    if (_isNearAnchor(v, expectedL) || _isNearAnchor(v, expectedR)) {
+      final pair = _derivePairFromOne(v, expectedL, expectedR);
+      debugPrint("페이지 번호 N=1, $v 앵커 근방 → ${pair.left}·${pair.right}");
+      return pair;
     }
-
-    return (left: l, right: r, confirmed: confirmed);
+    debugPrint("페이지 번호 N=1, $v 앵커와 멂 → 앵커 폴백");
+    return (left: expectedL, right: expectedR, confirmed: false);
   }
 
   // 슬라이스 1: 페이지 OCR 품질 점수 — 재독 시 더 선명한 사본으로 교체할지 판단.
