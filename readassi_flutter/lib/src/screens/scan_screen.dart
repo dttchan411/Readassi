@@ -134,6 +134,13 @@ class _ScanScreenState extends State<ScanScreen> {
     _bandCount * 2,
     null,
   );
+  // 슬라이스 2 (지연 OCR): 좌상단을 제외한 칸은 캡처 시점에 OCR하지 않고
+  // 이미지(JPEG 바이트)만 보관한다. 8칸이 다 모이면 한 번에 배치(Future.wait)로
+  // OCR해 _cellLines를 채운다. null이면 아직 이미지도 미수집.
+  final List<Uint8List?> _pendingCellImages = List<Uint8List?>.filled(
+    _bandCount * 2,
+    null,
+  );
   // 슬라이스 2: 지금 띠 수집 중인 페이지의 상단 지문(페이지 ID). 수집 도중
   // 이 지문이 크게 달라지면 페이지가 넘어간 것으로 보고 띠 버퍼를 리셋한다.
   List<String>? _bandPageFingerprint;
@@ -889,14 +896,23 @@ class _ScanScreenState extends State<ScanScreen> {
     final covered = List<bool>.filled(_bandCount * 2, false);
     final boxes = _effectiveHandBoxes();
     if (boxes.isEmpty) return covered;
+    // 셀을 '본문 영역'(인셋된 책 박스)으로 클리핑해, 가장자리(여백/모서리)
+    // 부분과 손이 닿는 건 가려짐으로 보지 않는다. 전체 OCR 게이트(_handCoversText)
+    // 와 같은 기준을 셀 단위에 적용 — 가장자리 손이 띠 수집을 막던 회귀를 해소.
+    final inner = _innerTextRegion();
     for (int row = 0; row < _bandCount; row++) {
       for (int col = 0; col < 2; col++) {
         final cell = _cellRect(row, col);
+        final cellInner = cell.intersect(inner);
+        if (cellInner.width <= 0 || cellInner.height <= 0) {
+          // 셀이 통째로 인셋 바깥(본문 없음) — 가려질 일도 없음.
+          continue;
+        }
         for (final box in boxes) {
-          if (box.right > cell.left &&
-              box.left < cell.right &&
-              box.bottom > cell.top &&
-              box.top < cell.bottom) {
+          if (box.right > cellInner.left &&
+              box.left < cellInner.right &&
+              box.bottom > cellInner.top &&
+              box.top < cellInner.bottom) {
             covered[row * 2 + col] = true;
             break;
           }
@@ -906,22 +922,27 @@ class _ScanScreenState extends State<ScanScreen> {
     return covered;
   }
 
-  // 디버그 오버레이용 8칸 수집 상태(칸별로 수집 여부).
+  // 디버그 오버레이용 8칸 수집 상태(OCR 결과든 보류 이미지든 데이터가 있으면 수집됨).
   List<bool> _cellCollectedView() {
-    return [for (final c in _cellLines) c != null];
+    return [
+      for (int i = 0; i < _cellLines.length; i++)
+        _cellLines[i] != null || _pendingCellImages[i] != null,
+    ];
   }
 
   // 명령 3: 셀 수집 상태를 초기화한다(새 페이지 시작/완성/전체촬영 시).
   void _resetBandCollection() {
     for (int i = 0; i < _cellLines.length; i++) {
       _cellLines[i] = null;
+      _pendingCellImages[i] = null;
     }
     _bandPageFingerprint = null;
   }
 
-  // 명령 3 + 슬라이스 2: 손이 본문을 가린 동안, 사진 한 장을 찍어 손이 안 가린
-  // 깨끗한 칸(8칸 중)을 모두 수집한다. 좌·우 열을 독립적으로 다루므로,
-  // 오른쪽에 손이 있어도 왼쪽 칸(특히 좌상단)은 수집된다.
+  // 명령 3 + 슬라이스 2 (지연 OCR): 손이 본문을 가린 동안 한 장 찍어,
+  // ① 좌상단을 매번 OCR해 페이지 ID를 검증(재독 / 페이지 넘김 감지),
+  // ② 나머지 깨끗한 칸은 이미지로만 보관하고,
+  // ③ 8칸이 다 모이면 보관된 이미지들을 한꺼번에(병렬) OCR해 페이지 조립한다.
   Future<void> _collectCleanBands() async {
     if (_controller == null ||
         !_controller!.value.isInitialized ||
@@ -934,7 +955,8 @@ class _ScanScreenState extends State<ScanScreen> {
     final coverage = _cellCoverage();
     bool anyHarvestable = false;
     for (int i = 0; i < _cellLines.length; i++) {
-      if (_cellLines[i] == null && !coverage[i]) {
+      final hasData = _cellLines[i] != null || _pendingCellImages[i] != null;
+      if (!hasData && !coverage[i]) {
         anyHarvestable = true;
         break;
       }
@@ -943,11 +965,9 @@ class _ScanScreenState extends State<ScanScreen> {
       _setCaptureStatus(_CaptureStatus.handOverlap);
       return;
     }
-    // 좌상단 칸을 이번에 수집한다면 '페이지 검사중'으로 표시한다.
+    // 좌상단(셀 0)이 깨끗하면 페이지 ID를 다루는 단계라 '페이지 검사중' 표시.
     _setCaptureStatus(
-      (_cellLines[0] == null && !coverage[0])
-          ? _CaptureStatus.pageChecking
-          : _CaptureStatus.capturing,
+      !coverage[0] ? _CaptureStatus.pageChecking : _CaptureStatus.capturing,
     );
 
     setState(() => _isCaptureBusy = true);
@@ -967,7 +987,10 @@ class _ScanScreenState extends State<ScanScreen> {
       }
 
       // 첫 수집 캡처에서 책등 위치를 자동 감지한다.
-      if (_cellLines.every((c) => c == null)) {
+      final fresh =
+          _cellLines.every((c) => c == null) &&
+          _pendingCellImages.every((b) => b == null);
+      if (fresh) {
         final detected = _detectSpineX(oriented, _captureBox);
         if (mounted) setState(() => _spineX = detected);
       }
@@ -976,31 +999,80 @@ class _ScanScreenState extends State<ScanScreen> {
       final spine = _spineX.clamp(box.left, box.right);
       final overlap = _bandOverlap * box.height;
 
-      // 미수집 + 지금 깨끗한 칸을 모두 크롭·OCR해 수집한다.
-      // 좌우 페이지는 책등에서 갈라 각각 OCR한다(Vision 줄 순서 보존).
+      // ── ① 좌상단 OCR — 매 캡처마다 페이지 ID 검증 ─────────────────
+      // 좌상단은 _topBandHasHand 게이트로 깨끗함이 보장된 상태. 매번 OCR해
+      // 진행 중인 페이지와 같은지 확인한다(움직임이 페이지 넘김이었는지 판정).
+      final (bandTop0, bandBottom0) = _bandBounds(0);
+      final topLeftCrop = _cropEncode(
+        oriented,
+        bandTop0 - overlap,
+        bandBottom0 + overlap,
+        box.left,
+        spine,
+      );
+      final topLeftLines = await _ocrLines(topLeftCrop);
+      final currentFp = _buildFingerprintLines(topLeftLines, const []);
+
+      bool isStage1 = _bandPageFingerprint == null;
+      if (!isStage1 &&
+          currentFp.isNotEmpty &&
+          _fingerprintSimilarity(currentFp, _bandPageFingerprint!) <
+              _rereadSimThreshold) {
+        // 페이지가 바뀜 → 버퍼 리셋, 이번 캡처를 새 stage-1로 본다.
+        debugPrint("수집 중 페이지 넘김 감지 — 버퍼 리셋, 새 페이지 재시작.");
+        _resetBandCollection();
+        isStage1 = true;
+      }
+
+      if (isStage1) {
+        // stage 1: 저장된 페이지와의 재독 검사.
+        if (currentFp.length >= _fingerprintLineCount) {
+          final stored = _matchStoredPage(currentFp);
+          if (stored != null) {
+            _handleProbeReread(stored);
+            _resetBandCollection();
+            if (mounted && _isAutoMode) {
+              _lastCaptureAt = DateTime.now();
+              _awaitingMotionBeforeNextCapture = true;
+              _stableSince = null;
+            }
+            if (wasStreaming && _isAutoMode) {
+              await _ensureImageStreamRunning();
+            }
+            return;
+          }
+        }
+        // 새 페이지로 확정.
+        _bandPageFingerprint = currentFp;
+      }
+
+      // 좌상단 OCR 결과 저장(아직 없거나 비어 있던 자리에 더 풍부한 OCR이면 갱신).
+      final stored = _cellLines[0];
+      if (stored == null || (stored.isEmpty && topLeftLines.isNotEmpty)) {
+        _cellLines[0] = topLeftLines;
+      }
+
+      // ── ② 나머지 깨끗한 칸은 이미지로만 저장(OCR 지연) ──────────────
       for (int row = 0; row < _bandCount; row++) {
         final (bandTop, bandBottom) = _bandBounds(row);
         final cropTop = bandTop - overlap;
         final cropBottom = bandBottom + overlap;
         for (int col = 0; col < 2; col++) {
           final idx = row * 2 + col;
-          if (_cellLines[idx] != null || coverage[idx]) continue;
+          if (idx == 0) continue; // 좌상단은 위에서 처리됨
+          if (_cellLines[idx] != null || _pendingCellImages[idx] != null) {
+            continue;
+          }
+          if (coverage[idx]) continue;
           final left = col == 0 ? box.left : spine;
           final right = col == 0 ? spine : box.right;
-          final crop = _cropEncode(oriented, cropTop, cropBottom, left, right);
-          _cellLines[idx] = await _ocrLines(crop);
-        }
-      }
-
-      // 슬라이스 2: 좌상단 칸 지문으로 수집 도중 페이지 넘김을 검사한다.
-      final fp = _topPrefixFingerprint();
-      if (fp != null && fp.length >= _fingerprintLineCount) {
-        if (_bandPageFingerprint == null) {
-          _bandPageFingerprint = fp;
-        } else if (_fingerprintSimilarity(fp, _bandPageFingerprint!) <
-            _rereadSimThreshold) {
-          debugPrint("슬라이스 2: 수집 중 페이지 넘김 감지 — 칸 버퍼 리셋.");
-          _resetBandCollection();
+          _pendingCellImages[idx] = _cropEncode(
+            oriented,
+            cropTop,
+            cropBottom,
+            left,
+            right,
+          );
         }
       }
 
@@ -1009,11 +1081,30 @@ class _ScanScreenState extends State<ScanScreen> {
         _stableSince = null;
       }
 
-      if (_cellLines.every((c) => c != null)) {
+      // ── ③ 모든 칸이 데이터(OCR or 이미지)를 가졌으면 배치 OCR + 조립 ──
+      final allHaveData = [
+        for (int i = 0; i < _cellLines.length; i++)
+          _cellLines[i] != null || _pendingCellImages[i] != null,
+      ].every((b) => b);
+
+      if (allHaveData) {
+        final pendingIdxs = <int>[];
+        final pendingFutures = <Future<List<_VisionLine>>>[];
+        for (int i = 0; i < _cellLines.length; i++) {
+          if (_cellLines[i] == null && _pendingCellImages[i] != null) {
+            pendingIdxs.add(i);
+            pendingFutures.add(_ocrLines(_pendingCellImages[i]!));
+          }
+        }
+        if (pendingFutures.isNotEmpty) {
+          debugPrint("배치 OCR: ${pendingFutures.length}장 동시 발사.");
+          final results = await Future.wait(pendingFutures);
+          for (int k = 0; k < pendingIdxs.length; k++) {
+            _cellLines[pendingIdxs[k]] = results[k];
+            _pendingCellImages[pendingIdxs[k]] = null;
+          }
+        }
         await _assembleAndSaveBands();
-      } else {
-        // 슬라이스 3: 좌상단 칸이 모였으면 재독을 미리 검사해 조기 종료한다.
-        _checkEarlyReread();
       }
 
       if (wasStreaming && _isAutoMode) {
@@ -1425,43 +1516,6 @@ class _ScanScreenState extends State<ScanScreen> {
       });
       _flashPageUpdate("중복 페이지 - OCR 수행X");
     }
-  }
-
-  // 슬라이스 3: 맨 위 띠가 모이면 모든 띠를 모으기 전에 상단 지문으로 재독을
-  // 미리 판정한다. 재독이면 나머지 띠 OCR을 건너뛰어 비용을 아낀다. 재독이
-  // 아니거나 아직 지문이 부족하면 아무것도 하지 않고 평소대로 수집을 잇는다.
-  // (조기 검사가 놓쳐도 조립 시점 `_commitSpread`가 다시 거르므로 정확성은 안전.)
-  void _checkEarlyReread() {
-    final fingerprint = _topPrefixFingerprint();
-    if (fingerprint == null) return;
-    // 슬라이스 1 탐침과 같은 재독 판정 경로(_matchStoredPage)를 그대로 쓴다.
-    final hit = _matchStoredPage(fingerprint);
-    if (hit == null) return;
-
-    debugPrint("명령 3: 조기 재독 감지 — 기존 ${hit.rightNumber}P, 띠 수집 중단.");
-    _advanceAnchor(hit.rightNumber);
-    _resetBandCollection();
-    _awaitingMotionBeforeNextCapture = true;
-    _stableSince = null;
-    if (mounted) {
-      AppStateScope.of(
-        context,
-      ).updateBookCurrentPage(widget.bookId, hit.rightNumber);
-      setState(() {
-        _lastOcrFullText = hit.text;
-        _currentRecognizedPage = hit.rightNumber;
-      });
-      _flashPageUpdate("중복 페이지 - OCR 수행X");
-    }
-  }
-
-  // 슬라이스 2: 좌상단 칸(없으면 우상단 칸)으로 페이지 식별 지문을 만든다.
-  // 상단 행(좌·우)이 아직 한 칸도 수집 안 됐으면 null.
-  List<String>? _topPrefixFingerprint() {
-    final topLeft = _cellLines[0];
-    final topRight = _cellLines[1];
-    if (topLeft == null && topRight == null) return null;
-    return _buildFingerprintLines(topLeft ?? const [], topRight ?? const []);
   }
 
   // 페이지 식별 지문 — 좌측 페이지 상단 줄을 우선 쓰고, 좌측에 글자가 없으면
