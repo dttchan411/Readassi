@@ -1529,13 +1529,20 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // ── 페이지 번호 확정 ──────────────────────────────────────────────
-  // 단일 OCR 한 번을 그대로 믿지 않고, 좌·우 쌍의 연속성·앵커(최근 추세)·
-  // 숫자 혼동쌍이 서로 검산하게 해서 페이지 번호를 정한다.
+  // ① 베이스라인: OCR을 기본 신뢰(예전 단순 보정 — 비연속이면 큰 쪽 신뢰,
+  //    한쪽만 있으면 인접번호 유도, 둘 다 없으면 앵커+1·+2 폴백).
+  // ② 방어: 결과가 기대값에서 '갑자기 점프'했거나 패리티 락을 어기면,
+  //    혼동쌍 스왑을 모든 조합으로 시도해 기대값과 *정확히 일치*하면 오인으로
+  //    보고 기대값으로 교정. 패리티 락 위반인데 스왑도 안 맞으면 기대값 강제.
+  // ③ 패리티 학습: 깨끗한 reading(둘 다 OCR + 연속)이 같은 패리티로 연속
+  //    _parityLockMinVotes회 나오면 락. 락이 잡히면 이후 위반은 ②가 보정.
 
-  // 앵커와 '근방'으로 볼 페이지 번호 허용 오차.
-  static const int _pageAnchorTolerance = 3;
+  // "갑자기 점프"로 볼 기대값 대비 최소 차이(페이지 수).
+  static const int _suddenJumpThreshold = 5;
+  // 패리티 락에 필요한 연속 일치 횟수.
+  static const int _parityLockMinVotes = 5;
 
-  // OCR이 인쇄체에서 자주 헷갈리는 숫자 쌍 — 한쪽이 다른 쪽으로 오인될 수 있다.
+  // OCR이 인쇄체에서 자주 헷갈리는 숫자 쌍.
   static const Map<int, List<int>> _digitConfusions = {
     0: [6, 8],
     1: [4, 7],
@@ -1548,30 +1555,61 @@ class _ScanScreenState extends State<ScanScreen> {
     9: [3, 4, 7],
   };
 
-  bool _digitsConfusable(int a, int b) {
-    if (a == b) return true;
-    return (_digitConfusions[a]?.contains(b) ?? false) ||
-        (_digitConfusions[b]?.contains(a) ?? false);
+  // 페이지 패리티 락 상태(이 책의 펼침면이 짝-홀인지 홀-짝인지).
+  _PageParity? _parityLock;
+  _PageParity? _parityRunType;
+  int _parityRunCount = 0;
+
+  _PageParity _parityOf(int left) =>
+      left.isEven ? _PageParity.evenOdd : _PageParity.oddEven;
+
+  // 한 자릿수에서 OCR이 헷갈릴 수 있는 후보들(자기 자신 포함).
+  List<int> _digitVariants(int digit) {
+    return [digit, ...(_digitConfusions[digit] ?? const [])];
   }
 
-  // [got]이 [expected]의 OCR 오인인가 — 자릿수가 같고 모든 자리가 같거나 혼동쌍.
-  bool _isConfusionMisread(int expected, int got) {
-    if (expected == got || expected < 0 || got < 0) return false;
-    final e = expected.toString();
-    final g = got.toString();
-    if (e.length != g.length) return false;
-    bool anyDiff = false;
-    for (int i = 0; i < e.length; i++) {
-      final ed = int.parse(e[i]);
-      final gd = int.parse(g[i]);
-      if (ed != gd) anyDiff = true;
-      if (!_digitsConfusable(ed, gd)) return false;
+  // [n]의 자릿수마다 혼동쌍 치환을 곱집합으로 펼친 모든 변형 숫자.
+  Set<int> _numberSwapVariants(int n) {
+    if (n < 0) return {n};
+    final digits = n
+        .toString()
+        .split('')
+        .map((c) => _digitVariants(int.parse(c)))
+        .toList();
+    final out = <int>{};
+    void recurse(int idx, String acc) {
+      if (idx == digits.length) {
+        out.add(int.parse(acc));
+        return;
+      }
+      for (final d in digits[idx]) {
+        recurse(idx + 1, '$acc$d');
+      }
     }
-    return anyDiff;
+    recurse(0, '');
+    return out;
   }
 
-  // 두 페이지 번호가 '근방'(앵커 허용 오차 이내)인가.
-  bool _pageNear(int a, int b) => (a - b).abs() <= _pageAnchorTolerance;
+  // 좌·우 OCR값을 혼동쌍 스왑으로 (expLeft, expRight)에 정확히 도달할 수 있나.
+  // 둘 다 있으면 둘 다, 하나만 있으면 그쪽만 일치하면 된다.
+  bool _canCorrectViaSwap(
+    int? rawLeft,
+    int? rawRight,
+    int expLeft,
+    int expRight,
+  ) {
+    if (rawLeft != null && rawRight != null) {
+      return _numberSwapVariants(rawLeft).contains(expLeft) &&
+          _numberSwapVariants(rawRight).contains(expRight);
+    }
+    if (rawLeft != null) {
+      return _numberSwapVariants(rawLeft).contains(expLeft);
+    }
+    if (rawRight != null) {
+      return _numberSwapVariants(rawRight).contains(expRight);
+    }
+    return false;
+  }
 
   // 앵커(_lastCommittedRight)를 전진시킨다 — 뒤로 돌아간 곁다리가 앵커를
   // 끌어내리지 않도록 max로만 갱신한다.
@@ -1581,7 +1619,26 @@ class _ScanScreenState extends State<ScanScreen> {
         : math.max(_lastCommittedRight!, right);
   }
 
-  // 한 펼침면의 좌·우 페이지 번호를 확정한다. confirmed=false면 추정/폴백이다.
+  // 패리티 학습 — 깨끗한 reading일 때만 카운트, 연속 N회면 락.
+  void _learnParity(int left) {
+    if (_parityLock != null) return; // 이미 락된 책은 학습 안 함
+    final p = _parityOf(left);
+    if (_parityRunType == p) {
+      _parityRunCount++;
+    } else {
+      _parityRunType = p;
+      _parityRunCount = 1;
+    }
+    if (_parityRunCount >= _parityLockMinVotes) {
+      _parityLock = p;
+      debugPrint(
+        "페이지 패리티 락: ${p == _PageParity.evenOdd ? '짝-홀' : '홀-짝'}",
+      );
+    }
+  }
+
+  // 한 펼침면의 좌·우 페이지 번호를 확정한다.
+  // confirmed=false면 OCR을 그대로 안 쓰고 추정/방어 교정된 결과다.
   ({int left, int right, bool confirmed}) _resolvePageNumbers(
     List<_VisionLine> leftLines,
     List<_VisionLine> rightLines,
@@ -1590,76 +1647,64 @@ class _ScanScreenState extends State<ScanScreen> {
     final rawRight = _extractBottomPageNumber(rightLines);
     final anchor = _lastCommittedRight;
 
-    // 앵커 없음(첫 페이지) — OCR을 그대로 신뢰한다.
-    if (anchor == null) {
-      if (rawLeft != null && rawRight != null) {
-        if (rawRight == rawLeft + 1) {
-          return (left: rawLeft, right: rawRight, confirmed: true);
+    // ① 베이스라인 — OCR 신뢰(예전 방식).
+    int? l = rawLeft;
+    int? r = rawRight;
+    bool confirmed = rawLeft != null || rawRight != null;
+
+    if (l != null && r != null && r != l + 1) {
+      // 비연속 — 더 큰 쪽을 진실로 보고 다른 쪽을 ±1로 보정.
+      if (l >= r) {
+        r = l + 1;
+      } else {
+        l = r - 1;
+      }
+    }
+    if (l == null && r == null) {
+      l = anchor != null ? anchor + 1 : 1;
+      r = anchor != null ? anchor + 2 : 2;
+    } else {
+      l ??= r! - 1;
+      r ??= l + 1;
+    }
+
+    // ② 방어 — 갑작스러운 점프 or 패리티 락 위반이면 스왑-검산 시도.
+    if (anchor != null) {
+      final expLeft = anchor + 1;
+      final expRight = anchor + 2;
+      final sudden = (r - expRight).abs() > _suddenJumpThreshold;
+      final parityViolates =
+          _parityLock != null && _parityOf(l) != _parityLock;
+      if (sudden || parityViolates) {
+        if (_canCorrectViaSwap(rawLeft, rawRight, expLeft, expRight)) {
+          debugPrint(
+            "혼동쌍 스왑 교정: $rawLeft|$rawRight → $expLeft|$expRight",
+          );
+          l = expLeft;
+          r = expRight;
+          confirmed = false;
+        } else if (parityViolates) {
+          // 락 위반인데 스왑으로도 일치 안 함 — 락을 우선해 기대값 강제.
+          debugPrint(
+            "패리티 락 위반(스왑 실패): $rawLeft|$rawRight → $expLeft|$expRight",
+          );
+          l = expLeft;
+          r = expRight;
+          confirmed = false;
         }
-        return (left: rawRight - 1, right: rawRight, confirmed: true);
+        // sudden만이고 스왑도 안 맞으면 → 진짜 점프 후보로 보고 그대로 둔다.
       }
-      if (rawRight != null) {
-        return (left: rawRight - 1, right: rawRight, confirmed: true);
-      }
-      if (rawLeft != null) {
-        return (left: rawLeft, right: rawLeft + 1, confirmed: true);
-      }
-      return (left: 1, right: 2, confirmed: false);
     }
 
-    final expectedLeft = anchor + 1;
-    final expectedRight = anchor + 2;
-
-    // 둘 다 못 읽음 → 기대값 폴백.
-    if (rawLeft == null && rawRight == null) {
-      return (left: expectedLeft, right: expectedRight, confirmed: false);
+    // ③ 패리티 학습 — 깨끗한(둘 다 OCR + 연속) 베이스라인에만 표 한 장.
+    if (confirmed &&
+        rawLeft != null &&
+        rawRight != null &&
+        rawRight == rawLeft + 1) {
+      _learnParity(l);
     }
 
-    // 한쪽만 읽음 → 그 값과 기대값을 교차검증한다.
-    if (rawLeft == null || rawRight == null) {
-      final isLeft = rawLeft != null;
-      final raw = rawLeft ?? rawRight!;
-      final expectedForThis = isLeft ? expectedLeft : expectedRight;
-      if (_pageNear(raw, expectedForThis)) {
-        final l = isLeft ? raw : raw - 1;
-        return (left: l, right: l + 1, confirmed: true);
-      }
-      if (_isConfusionMisread(expectedForThis, raw)) {
-        // 시프트 오인 → 기대값으로 교정.
-        return (left: expectedLeft, right: expectedRight, confirmed: false);
-      }
-      // 진짜 점프 후보지만 단일 번호라 약함 — 그 값을 쓰되 미확정으로 둔다.
-      final l = isLeft ? raw : raw - 1;
-      return (left: l, right: l + 1, confirmed: false);
-    }
-
-    // 둘 다 읽음.
-    final consecutive = rawRight == rawLeft + 1;
-    if (consecutive) {
-      if (_pageNear(rawRight, expectedRight)) {
-        // 연속 + 기대값 근방 → 최상 신뢰.
-        return (left: rawLeft, right: rawRight, confirmed: true);
-      }
-      // 연속인데 기대값과 멂 — 좌·우 모두 혼동쌍 거리면 펼침면 전체 시프트 오인.
-      if (_isConfusionMisread(expectedLeft, rawLeft) &&
-          _isConfusionMisread(expectedRight, rawRight)) {
-        return (left: expectedLeft, right: expectedRight, confirmed: false);
-      }
-      // 혼동쌍이 아님 → 깨끗한 연속 쌍 → 진짜 점프로 보고 신뢰(앵커 재설정).
-      return (left: rawLeft, right: rawRight, confirmed: true);
-    }
-
-    // 비연속 — 최소 한쪽 오류. 기대값과 맞는 쪽을 채택하고 나머지를 유도한다.
-    final leftMatches = _pageNear(rawLeft, expectedLeft);
-    final rightMatches = _pageNear(rawRight, expectedRight);
-    if (leftMatches && !rightMatches) {
-      return (left: rawLeft, right: rawLeft + 1, confirmed: true);
-    }
-    if (rightMatches && !leftMatches) {
-      return (left: rawRight - 1, right: rawRight, confirmed: true);
-    }
-    // 둘 다 안 맞음(또는 둘 다 맞지만 비연속 — 모순) → 기대값 폴백 + 미확정.
-    return (left: expectedLeft, right: expectedRight, confirmed: false);
+    return (left: l, right: r, confirmed: confirmed);
   }
 
   // 슬라이스 1: 페이지 OCR 품질 점수 — 재독 시 더 선명한 사본으로 교체할지 판단.
@@ -2314,3 +2359,8 @@ enum _CaptureStatus {
   capturing, // 깨끗한 프레임 → 촬영·OCR 진행 중
   pageChecking, // 상단 띠 OCR로 페이지(재독) 검사 중
 }
+
+// 펼침면 패리티 — 책의 본래 페이지매김 규칙.
+//   evenOdd: 왼쪽=짝수, 오른쪽=홀수 (LTR 책의 표준; 예 20|21)
+//   oddEven: 왼쪽=홀수, 오른쪽=짝수 (RTL/일부 조판; 예 21|22)
+enum _PageParity { evenOdd, oddEven }
