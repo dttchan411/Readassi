@@ -21,6 +21,10 @@ class DemoDashboardService {
   // OCR 결과로 교체되면 _texts에 저장(이미지는 비움).
   final List<Uint8List?> _images = List.filled(_cellCount, null);
   final List<String?> _texts = List.filled(_cellCount, null);
+  // 전체 OCR 결과(합쳐진 본문) / 한 장 전체 사진. 8셀이 다 모인 뒤 합쳐진 텍스트나,
+  // 8셀 없이 한 장으로 통째 OCR한 결과를 여기 보관. 클라이언트에서 "전체 OCR" 버튼/모드로 본다.
+  String? _fullText;
+  Uint8List? _fullImage;
   String? _publicUrl;
 
   String? get url => _publicUrl;
@@ -95,11 +99,28 @@ class DemoDashboardService {
       _handleWebSocket(request);
     } else if (path.startsWith('/cell/')) {
       _serveCellImage(request);
+    } else if (path == '/full.jpg') {
+      _serveFullImage(request);
     } else {
       request.response
         ..statusCode = HttpStatus.notFound
         ..close();
     }
+  }
+
+  void _serveFullImage(HttpRequest request) {
+    if (_fullImage == null) {
+      request.response
+        ..statusCode = HttpStatus.notFound
+        ..close();
+      return;
+    }
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType('image', 'jpeg')
+      ..headers.set('Cache-Control', 'no-store')
+      ..add(_fullImage!)
+      ..close();
   }
 
   void _serveHtml(HttpRequest request) {
@@ -168,6 +189,13 @@ class DemoDashboardService {
         }
       } catch (_) {}
     }
+    if (_fullText != null || _fullImage != null) {
+      ws.add(jsonEncode({
+        'type': 'fullPage',
+        'hasImage': _fullImage != null,
+        'text': _fullText ?? '',
+      }));
+    }
   }
 
   void _broadcast(Map<String, dynamic> msg) {
@@ -203,12 +231,28 @@ class DemoDashboardService {
     _broadcast({'cell': idx, 'type': 'text', 'text': text});
   }
 
+  /// 전체 OCR 결과를 한 번에 push. image가 있으면(=한 장으로 전체 OCR한 케이스)
+  /// 클라이언트는 자동으로 전체 모드로 전환하고 사진+텍스트 토글을 보여준다.
+  /// image가 null이면(=8칸 합친 케이스) 텍스트만 보관하고 모드 전환은 하지 않음.
+  /// 호출 시 이전 fullImage는 항상 갱신됨 — 이전 페이지 사진이 남는 문제 방지.
+  void pushFullPage({Uint8List? image, required String text}) {
+    _fullImage = image;
+    _fullText = text;
+    _broadcast({
+      'type': 'fullPage',
+      'hasImage': image != null,
+      'text': text,
+    });
+  }
+
   /// 모든 셀을 빈 칸으로 초기화(새 페이지 시작 시).
   void reset() {
     for (int i = 0; i < _cellCount; i++) {
       _images[i] = null;
       _texts[i] = null;
     }
+    _fullText = null;
+    _fullImage = null;
     _broadcast({'type': 'reset'});
   }
 
@@ -275,15 +319,40 @@ class DemoDashboardService {
     .cell.has-image { border-color: var(--warn); }
     .cell.has-both { border-color: var(--accent); }
     .cell.view-text { border-color: var(--info); }
+    button.toggle { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+      padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+      transition: all 0.15s; }
+    button.toggle:hover { border-color: var(--info); color: var(--info); }
+    button.toggle.active { background: var(--info); color: var(--bg); border-color: var(--info); }
+    button.toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+    #full-panel { display: none; height: calc(100vh - 70px); background: var(--panel);
+      border: 2px solid var(--border); border-radius: 8px; padding: 12px; overflow: hidden;
+      flex-direction: column; }
+    #full-panel.show { display: flex; }
+    .grid.hide { display: none; }
+    #full-body { flex: 1; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; min-height: 0; }
+    #full-body img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+    #full-body pre { font-size: 13px; line-height: 1.55; color: var(--fg); white-space: pre-wrap;
+      word-wrap: break-word; margin: 0; padding: 0; max-height: 100%; overflow: auto; width: 100%;
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+    #full-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: flex;
+      justify-content: space-between; align-items: center; }
+    #full-hint { font-size: 10px; color: var(--info); }
   </style>
 </head>
 <body>
   <header>
     <h1>📚 OCR 8칸 라이브</h1>
     <span id="status">연결 중…</span>
-    <span class="legend">⬜ 빈 칸 · 🟡 이미지 수집 · 🟢 OCR 완료(클릭=텍스트 보기) · 🔵 텍스트 보기</span>
+    <button id="btn-full" class="toggle" disabled>📄 전체 OCR 보기</button>
+    <span class="legend">⬜ 빈 칸 · 🟡 이미지 수집 · 🟢 OCR 완료(클릭=텍스트) · 🔵 텍스트 보기</span>
   </header>
   <div class="grid" id="grid"></div>
+  <div id="full-panel">
+    <div id="full-meta"><span id="full-title">📄 전체 OCR</span><span id="full-hint">🔁 클릭=토글</span></div>
+    <div id="full-body"></div>
+  </div>
   <script>
     const labels = ['1행 좌','1행 우','2행 좌','2행 우','3행 좌','3행 우','4행 좌','4행 우'];
     const grid = document.getElementById('grid');
@@ -332,7 +401,77 @@ class DemoDashboardService {
         state[i] = { hasImage: false, text: null, view: 'image' };
         render(i);
       }
+      fullState.hasImage = false;
+      fullState.text = null;
+      fullState.view = 'image';
+      // 새 세션 시작 — 전체 모드면 8분할로 자동 복귀.
+      if (fullState.shown) {
+        fullState.shown = false;
+        fullPanel.classList.remove('show');
+        gridEl.classList.remove('hide');
+      }
+      updateFullButton();
+      renderFull();
     }
+    // 전체 OCR 상태(8칸 합쳐진 본문 또는 한 장 캡처 + 텍스트)
+    const fullState = { hasImage: false, text: null, view: 'image', shown: false };
+    const btnFull = document.getElementById('btn-full');
+    const fullPanel = document.getElementById('full-panel');
+    const fullBody = document.getElementById('full-body');
+    const fullTitle = document.getElementById('full-title');
+    const gridEl = document.getElementById('grid');
+    function updateFullButton() {
+      const has = fullState.hasImage || fullState.text !== null;
+      btnFull.disabled = !has;
+      btnFull.classList.toggle('active', fullState.shown);
+      btnFull.textContent = fullState.shown ? '🔲 8칸 보기' : '📄 전체 OCR 보기';
+    }
+    btnFull.addEventListener('click', () => {
+      if (btnFull.disabled) return;
+      fullState.shown = !fullState.shown;
+      fullPanel.classList.toggle('show', fullState.shown);
+      gridEl.classList.toggle('hide', fullState.shown);
+      updateFullButton();
+      renderFull();
+    });
+    fullBody.addEventListener('click', () => {
+      // 전체 모드 안에서 이미지↔텍스트 토글
+      if (!fullState.shown) return;
+      if (fullState.text === null) return;
+      if (!fullState.hasImage) return;
+      fullState.view = fullState.view === 'image' ? 'text' : 'image';
+      renderFull();
+    });
+    // 전체 OCR 결과(8칸 합친 텍스트 또는 한 장 전체 캡처) 한 번에 갱신.
+    // hasImage=true이면 한 장 전체 OCR 케이스로 보고 자동 전체 모드 전환.
+    // hasImage=false이면 8칸 합친 텍스트 — 모드 전환은 안 하고 버튼만 활성화.
+    function setFullPage(hasImage, text) {
+      fullState.hasImage = hasImage;
+      fullState.text = (text === '' ? null : (text || null));
+      fullState.view = hasImage ? 'image' : 'text';
+      if (hasImage && !fullState.shown) {
+        // 자동 전체 모드 진입 — 한 장으로 전체 OCR된 경우만.
+        fullState.shown = true;
+        fullPanel.classList.add('show');
+        gridEl.classList.add('hide');
+      }
+      updateFullButton();
+      renderFull();
+    }
+    function renderFull() {
+      if (fullState.hasImage && (fullState.view === 'image' || fullState.text === null)) {
+        fullTitle.textContent = '📄 전체 페이지 (사진)';
+        fullBody.innerHTML = '<img src="/full.jpg?t=' + Date.now() + '">';
+      } else if (fullState.text !== null) {
+        fullTitle.textContent = '📄 전체 OCR (텍스트)';
+        fullBody.innerHTML = '<pre>' +
+          (fullState.text.trim() ? escapeHtml(fullState.text) : '(빈 텍스트)') + '</pre>';
+      } else {
+        fullTitle.textContent = '📄 전체 OCR';
+        fullBody.innerHTML = '<span class="cell-empty">(아직 결과 없음)</span>';
+      }
+    }
+    updateFullButton();
     function render(idx) {
       const s = state[idx];
       const c = cells[idx];
@@ -375,6 +514,7 @@ class DemoDashboardService {
           if (msg.type === 'reset') clearAll();
           else if (msg.type === 'image') setImage(msg.cell);
           else if (msg.type === 'text') setText(msg.cell, msg.text);
+          else if (msg.type === 'fullPage') setFullPage(!!msg.hasImage, msg.text);
         } catch (e) {}
       };
     }

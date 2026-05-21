@@ -70,10 +70,8 @@ class _ScanScreenState extends State<ScanScreen> {
   static const int _fingerprintLineCount = 3; // 좌/우 각 상단에서 지문에 쓸 줄 수
   static const double _rereadSimThreshold = 0.6; // 재독으로 볼 지문 유사도(0~1)
   static const int _runningHeaderMinPages = 3; // 러닝 헤더로 볼 최소 출현 페이지 수
-  static const int _pageNumberSearchLines = 6; // 하단 페이지번호를 찾을 줄 수
+  static const int _pageNumberSearchLines = 6; // 페이지번호를 찾을 줄 수(셀 위/아래)
   static const int _pageNumberMaxTokens = 6; // 페이지번호 줄로 볼 최대 어절 수
-  // 페이지 확인용 상단 탐침 띠 높이(정규화) — 본문 전체 OCR 전 재독 판정에 쓴다.
-  static const double _probeStripHeight = 0.32;
 
   final String _googleVisionApiKey = dotenv.env['_googleVisionApiKey'] ?? "";
   final String _geminiApiKey = dotenv.env['_geminiApiKey'] ?? "";
@@ -145,15 +143,29 @@ class _ScanScreenState extends State<ScanScreen> {
     _bandCount * 2,
     null,
   );
+  // OCR 후에도 살아남아 페이지 commit / 미확인 demote 시 디스크에 저장될 셀 이미지.
+  // _pendingCellImages는 OCR 발사 후 null로 비워지지만 이건 _resetBandCollection 전까지 유지.
+  final List<Uint8List?> _cellImageBytes = List<Uint8List?>.filled(
+    _bandCount * 2,
+    null,
+  );
   // 슬라이스 2: 지금 띠 수집 중인 페이지의 상단 지문(페이지 ID). 수집 도중
   // 이 지문이 크게 달라지면 페이지가 넘어간 것으로 보고 띠 버퍼를 리셋한다.
   List<String>? _bandPageFingerprint;
+  // 재독(B 케이스) 시각화 — 저장된 페이지로 판정된 직후 다음 새 페이지가 들어올
+  // 때까지 디버그 패널의 8칸을 모두 ●(수집됨)으로 표시한다.
+  bool _rereadShowAllCollected = false;
   // 디버그 'OCR 결과 전체보기'용 — 마지막 OCR/조립 전체 텍스트.
   String? _lastOcrFullText;
 
   // 슬라이스 1: 명령 3로 조립된 펼침면을 페이지 번호 키로 보관하는 저장소.
   // 재독(이미 읽은 페이지) 감지·중복 방지·누락 페이지 기록의 source of truth.
   final List<_StoredPage> _pageStore = [];
+  // 미확인 버퍼 — 아직 8칸 다 못 모았지만 페이지 넘김/촬영 중지 등으로 임시 보관 중인
+  // 페이지들. 다음 좌상단 OCR이 이 중 매칭되면 그 버퍼를 복원해 이어서 수집.
+  // 메타데이터는 메모리, 셀 이미지는 디스크. FIFO로 최근 3개만 유지.
+  final List<_PendingPage> _pendingPages = [];
+  static const int _pendingBufferLimit = 3;
   // 러닝 헤더 감지용: 페이지 상단에 반복 인쇄되는 줄의 출현 페이지 수.
   final Map<String, int> _topLineFrequency = {};
   // 페이지 번호 앵커 — 지금까지 확정된 오른쪽 페이지 번호의 최댓값(읽기 진행 위치).
@@ -275,7 +287,51 @@ class _ScanScreenState extends State<ScanScreen> {
         bookDir.path,
         '${widget.bookId}_relmap.svg',
       ), // 관계도 SVG (Claude 생성, 분석 시 갱신)
+      'imagesDir': p.join(
+        bookDir.path,
+        '${widget.bookId}_images',
+      ), // 페이지/미확인 셀 이미지 디렉토리(B 케이스 시각화 / 미확인 재현용)
     };
+  }
+
+  // 8셀 이미지 바이트를 디스크에 저장하고 경로 리스트(8) 반환.
+  // subdir: 'page_<rightNum>' 또는 'pending_<id>' 같은 하위 폴더 이름.
+  Future<List<String?>> _saveCellImagesToDisk(
+    List<Uint8List?> bytes,
+    String subdir,
+  ) async {
+    final paths = await _getFilePaths();
+    final root = Directory(p.join(paths['imagesDir']!, subdir));
+    try {
+      await root.create(recursive: true);
+    } catch (e) {
+      debugPrint("이미지 디렉토리 생성 실패: $e");
+      return List<String?>.filled(bytes.length, null);
+    }
+    final result = List<String?>.filled(bytes.length, null);
+    for (int i = 0; i < bytes.length; i++) {
+      final data = bytes[i];
+      if (data == null) continue;
+      final filePath = p.join(root.path, 'cell_$i.jpg');
+      try {
+        await File(filePath).writeAsBytes(data, flush: false);
+        result[i] = filePath;
+      } catch (e) {
+        debugPrint("셀 이미지 저장 실패(idx=$i): $e");
+      }
+    }
+    return result;
+  }
+
+  // subdir 단위로 셀 이미지 파일들을 폐기.
+  Future<void> _deleteCellImageDir(String subdir) async {
+    final paths = await _getFilePaths();
+    final dir = Directory(p.join(paths['imagesDir']!, subdir));
+    try {
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (e) {
+      debugPrint("이미지 디렉토리 삭제 실패($subdir): $e");
+    }
   }
 
   // --- OCR 및 촬영 로직 ---
@@ -442,6 +498,7 @@ class _ScanScreenState extends State<ScanScreen> {
       _bookBox = null;
       _captureStatus = _CaptureStatus.motion;
       _lastOcrFullText = null;
+      _rereadShowAllCollected = false;
       // 손 래치(추적 유지)도 그대로 — 현재 카메라 상태를 반영.
       _resetBandCollection();
     });
@@ -495,111 +552,15 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
-  Future<void> _captureSinglePage() async {
-    if (_controller == null ||
-        !_controller!.value.isInitialized ||
-        _isCaptureBusy ||
-        _isProcessingAnalysis) {
-      return;
-    }
-
-    setState(() => _isCaptureBusy = true);
-    try {
-      debugPrint("전체 페이지 촬영 시작 — 손 게이트 '깨끗' 판정.");
-      final wasStreaming = _isImageStreamActive;
-      if (wasStreaming) {
-        await _stopImageStream();
-      }
-
-      final photo = await _controller!.takePicture();
-      final bytes = await File(photo.path).readAsBytes();
-
-      // 명령 3과 동일하게 책등 기준 좌우로 갈라 각각 OCR한 뒤 같은 페이지 저장소로 보낸다.
-      final oriented = _decodeOriented(bytes);
-      List<_VisionLine> leftLines;
-      List<_VisionLine> rightLines;
-      if (oriented == null) {
-        // 디코딩 실패 — 통짜 OCR로 폴백(좌우 분리 포기).
-        leftLines = await _ocrLines(bytes);
-        rightLines = const [];
-      } else {
-        final detected = _detectSpineX(oriented, _captureBox);
-        if (mounted) setState(() => _spineX = detected);
-        // 슬라이스 1: 크롭을 책 박스 기준으로.
-        final box = _captureBox;
-        final spine = _spineX.clamp(box.left, box.right);
-        final stripBottom = box.top + _probeStripHeight * box.height;
-        // 페이지 확인 우선: 상단 좁은 띠만 먼저 OCR해 재독인지 본다.
-        // 재독이면 본문 전체 OCR을 건너뛴다.
-        // 좌·우 상단 탐침을 동시에(병렬) OCR한다.
-        final probeResults = await Future.wait([
-          _ocrLines(
-            _cropEncode(oriented, box.top, stripBottom, box.left, spine),
-          ),
-          _ocrLines(
-            _cropEncode(oriented, box.top, stripBottom, spine, box.right),
-          ),
-        ]);
-        final probeLeft = probeResults[0];
-        final probeRight = probeResults[1];
-        final probeFingerprint = _buildFingerprintLines(probeLeft, probeRight);
-        final reread = _matchStoredPage(probeFingerprint);
-        debugPrint(
-          "페이지 확인: 상단 탐침 지문=$probeFingerprint → "
-          "${reread != null ? '재독(${reread.rightNumber}P)' : '새 페이지 후보'}.",
-        );
-        if (reread != null) {
-          _handleProbeReread(reread);
-          _resetBandCollection();
-          if (mounted && _isAutoMode) {
-            _lastCaptureAt = DateTime.now();
-            _awaitingMotionBeforeNextCapture = true;
-            _stableSince = null;
-          }
-          if (wasStreaming && _isAutoMode) {
-            await _ensureImageStreamRunning();
-          }
-          return;
-        }
-        // 새 페이지 — 책 박스 전체를 OCR한다.
-        _setCaptureStatus(_CaptureStatus.capturing);
-        final leftCrop = _cropEncode(
-          oriented, box.top, box.bottom, box.left, spine);
-        final rightCrop = _cropEncode(
-          oriented, box.top, box.bottom, spine, box.right);
-        // 좌·우 페이지 본문을 동시에(병렬) OCR한다.
-        final fullResults = await Future.wait([
-          _ocrLines(leftCrop),
-          _ocrLines(rightCrop),
-        ]);
-        leftLines = fullResults[0];
-        rightLines = fullResults[1];
-      }
-      await _commitSpread(leftLines, rightLines, false);
-      // 페이지 전체를 깨끗하게 한 장으로 찍었으므로, 진행 중이던 띠 수집은 폐기.
-      _resetBandCollection();
-
-      if (mounted && _isAutoMode) {
-        _lastCaptureAt = DateTime.now();
-        _awaitingMotionBeforeNextCapture = true;
-        _stableSince = null;
-      }
-
-      if (wasStreaming && _isAutoMode) {
-        await _ensureImageStreamRunning();
-      }
-    } catch (e) {
-      debugPrint("촬영 오류: $e");
-    } finally {
-      if (mounted) setState(() => _isCaptureBusy = false);
-    }
-  }
-
   Future<void> _stopAutoCapture() async {
     if (!_isAutoMode) return;
 
     // 스트림은 그대로 유지(손 추적은 카메라 켜진 동안 항상 돌게 함).
     // 자동 캡처 로직만 비활성화.
+
+    // 진행 중인 띠 수집이 있으면 미확인 버퍼로 보존 — 다시 촬영 시작 시
+    // 같은 페이지면 좌상단 매칭으로 이어서 수집 가능(D 케이스).
+    await _demoteToPending();
 
     setState(() {
       _isAutoMode = false;
@@ -718,26 +679,18 @@ class _ScanScreenState extends State<ScanScreen> {
 
     debugPrint(
       "촬영 라우팅 — handLatched=$_handLatched, "
-      "coversText=${_handCoversText()}, 게이트박스 ${_effectiveHandBoxes().length}개, "
+      "게이트박스 ${_effectiveHandBoxes().length}개, "
       "최신감지 detected=${hand.detected} boxes=${hand.boxes.length}.",
     );
-    if (_handLatched && _handCoversText()) {
-      // 손이 본문을 가림 → 명령 3: 손이 안 가린 깨끗한 띠만 골라 수집한다.
-      // 띠 수집은 현행 페이싱 유지 — 직전 캡처로부터 쿨다운(2초)을 적용한다.
-      if (_lastCaptureAt != null &&
-          now.difference(_lastCaptureAt!) < _captureCooldownDuration) {
-        _setCaptureStatus(_CaptureStatus.motion);
-        return;
-      }
-      await _collectCleanBands();
+    // 단일 경로 — 손이 본문을 가렸든 아니든 8분할 경로로 수집한다.
+    // 손이 본문에 안 닿으면 한 캡처에서 8셀 모두 채워져 즉시 완성된다.
+    // 직전 캡처로부터 쿨다운(2초)을 적용해 같은 페이지에서 과한 호출을 막는다.
+    if (_lastCaptureAt != null &&
+        now.difference(_lastCaptureAt!) < _captureCooldownDuration) {
+      _setCaptureStatus(_CaptureStatus.motion);
       return;
     }
-    // 손이 검출/추적되더라도 하단 여백 영역 안에만 있으면 본문은 안 가린 것으로 본다.
-
-    // 손이 본문과 안 겹침 → 깨끗한 프레임. 명령 2: 페이지 전체를 한 장으로 촬영.
-    // 빠른 경로 — 쿨다운 없이 움직임이 멈춘 즉시 전체 OCR로 잡는다.
-    _setCaptureStatus(_CaptureStatus.pageChecking);
-    await _captureSinglePage();
+    await _collectCleanBands();
   }
 
   // 디버그 패널용 손 감지. 밝기 게이트와 무관하게 자체 스로틀로 띄엄띄엄 실행한다.
@@ -962,7 +915,11 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // 디버그 오버레이용 8칸 수집 상태(OCR 결과든 보류 이미지든 데이터가 있으면 수집됨).
+  // B 케이스(재독 직후)에는 다음 새 페이지가 들어올 때까지 모두 ●로 표시한다.
   List<bool> _cellCollectedView() {
+    if (_rereadShowAllCollected) {
+      return List<bool>.filled(_cellLines.length, true);
+    }
     return [
       for (int i = 0; i < _cellLines.length; i++)
         _cellLines[i] != null || _pendingCellImages[i] != null,
@@ -985,8 +942,140 @@ class _ScanScreenState extends State<ScanScreen> {
     for (int i = 0; i < _cellLines.length; i++) {
       _cellLines[i] = null;
       _pendingCellImages[i] = null;
+      _cellImageBytes[i] = null;
     }
     _bandPageFingerprint = null;
+  }
+
+  // 현재 수집 중인 진행 버퍼(_cellLines + _cellImageBytes + _bandPageFingerprint)를
+  // 미확인 버퍼에 임시 저장한다. 셀 이미지는 디스크에 쓰고 경로만 메모리에 보관.
+  // 다음 좌상단 OCR이 이 지문과 매칭되면 _restoreFromPending으로 복원해 이어서 수집.
+  Future<void> _demoteToPending() async {
+    // 페이지가 바뀌었으므로 B 케이스 시각화(8칸 ●) 해제.
+    if (_rereadShowAllCollected && mounted) {
+      setState(() => _rereadShowAllCollected = false);
+    }
+    final fp = _bandPageFingerprint;
+    if (fp == null || fp.isEmpty) return;
+    final hasAnyData =
+        _cellLines.any((c) => c != null) ||
+        _cellImageBytes.any((b) => b != null);
+    if (!hasAnyData) return;
+    final id = 'pending_${DateTime.now().millisecondsSinceEpoch}';
+    final savedPaths = await _saveCellImagesToDisk(_cellImageBytes, id);
+    final snapshot = List<List<_VisionLine>?>.from(_cellLines);
+    final pending = _PendingPage(
+      id: id,
+      fingerprint: List<String>.from(fp),
+      cellLines: snapshot,
+      cellImagePaths: savedPaths,
+      createdAt: DateTime.now(),
+    );
+    _pendingPages.add(pending);
+    // FIFO — 초과분(가장 오래된 것)을 디스크째 폐기.
+    while (_pendingPages.length > _pendingBufferLimit) {
+      final dropped = _pendingPages.removeAt(0);
+      await _deleteCellImageDir(dropped.id);
+      debugPrint("미확인 버퍼 초과 — ${dropped.id} 폐기.");
+    }
+    debugPrint(
+      "미확인 버퍼에 임시 저장 — id=$id, 진행 ${snapshot.where((c) => c != null).length}/8칸. "
+      "현재 ${_pendingPages.length}/$_pendingBufferLimit개 보관.",
+    );
+  }
+
+  // 현재 좌상단 지문과 매칭되는 미확인 페이지 반환(가장 최근 것 우선). 없으면 null.
+  _PendingPage? _matchPendingPage(List<String> currentFp) {
+    if (_pendingPages.isEmpty || currentFp.length < _fingerprintLineCount) {
+      return null;
+    }
+    _PendingPage? best;
+    double bestSim = 0;
+    // 최근 것 우선 — 같은 유사도면 더 최근 것을 채택.
+    for (int i = _pendingPages.length - 1; i >= 0; i--) {
+      final cand = _pendingPages[i];
+      final sim = _fingerprintSimilarity(currentFp, cand.fingerprint);
+      if (sim >= _rereadSimThreshold && sim > bestSim) {
+        bestSim = sim;
+        best = cand;
+      }
+    }
+    return best;
+  }
+
+  // 미확인 페이지를 현재 진행 버퍼로 복원하고 미확인 목록에서 제거(디스크 이미지는 유지).
+  Future<void> _restoreFromPending(_PendingPage pending) async {
+    _bandPageFingerprint = List<String>.from(pending.fingerprint);
+    if (_rereadShowAllCollected && mounted) {
+      setState(() => _rereadShowAllCollected = false);
+    }
+    // 대시보드도 미확인 시점 상태로 복원 — 이전 페이지 잔상 제거 후 셀 이미지/텍스트 push.
+    _dashboard.reset();
+    for (int i = 0; i < _cellLines.length; i++) {
+      _cellLines[i] = pending.cellLines[i];
+      _pendingCellImages[i] = null;
+      // 디스크 이미지를 메모리로 다시 로드(_commitSpread에서 디스크 재저장에 사용).
+      final path = pending.cellImagePaths[i];
+      Uint8List? bytes;
+      if (path != null) {
+        try {
+          final f = File(path);
+          if (await f.exists()) bytes = await f.readAsBytes();
+        } catch (e) {
+          debugPrint("미확인 셀 이미지 로드 실패(idx=$i): $e");
+        }
+      }
+      _cellImageBytes[i] = bytes;
+      // 대시보드 셀 상태 복원: 이미지 있으면 push, OCR 결과 있으면 텍스트도 push.
+      if (bytes != null) _dashboard.pushImage(i, bytes);
+      final cellLines = pending.cellLines[i];
+      if (cellLines != null && cellLines.isNotEmpty) {
+        _dashboard.pushText(i, _cellText(cellLines));
+      }
+    }
+    _pendingPages.remove(pending);
+    await _deleteCellImageDir(pending.id);
+    debugPrint(
+      "미확인 ${pending.id} 복원 — ${_cellLines.where((c) => c != null).length}/8칸 이어서 수집.",
+    );
+  }
+
+  // B 케이스(재독) — 저장된 페이지의 셀 이미지를 대시보드에 표시.
+  // 디스크 경로가 있는 셀만 이미지로 push. 좌상단엔 페이지 번호 라벨도 push.
+  Future<void> _pushStoredPageToDashboard(_StoredPage page) async {
+    // 이전 페이지 잔상을 모두 비우고 저장된 페이지로 새로 채운다.
+    _dashboard.reset();
+    for (int i = 0; i < page.cellImagePaths.length; i++) {
+      final path = page.cellImagePaths[i];
+      if (path == null) continue;
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          final bytes = await f.readAsBytes();
+          _dashboard.pushImage(i, bytes);
+        }
+      } catch (e) {
+        debugPrint("저장 페이지 셀 이미지 푸시 실패(idx=$i): $e");
+      }
+    }
+    final label =
+        '📖 ${page.leftNumber}-${page.rightNumber}P (재독)';
+    _dashboard.pushText(0, label);
+  }
+
+  // 새 페이지가 _pageStore에 commit될 때 같은 지문의 미확인 항목을 정리.
+  Future<void> _evictMatchingPending(List<String> fingerprint) async {
+    if (_pendingPages.isEmpty || fingerprint.isEmpty) return;
+    final toRemove = <_PendingPage>[];
+    for (final cand in _pendingPages) {
+      final sim = _fingerprintSimilarity(fingerprint, cand.fingerprint);
+      if (sim >= _rereadSimThreshold) toRemove.add(cand);
+    }
+    for (final cand in toRemove) {
+      _pendingPages.remove(cand);
+      await _deleteCellImageDir(cand.id);
+      debugPrint("미확인 ${cand.id} → 페이지 저장소로 승격, 미확인에서 제거.");
+    }
   }
 
   // 명령 3 + 슬라이스 2 (지연 OCR): 손이 본문을 가린 동안 한 장 찍어,
@@ -1062,6 +1151,7 @@ class _ScanScreenState extends State<ScanScreen> {
       );
       // 대시보드: 좌상단 캡처 이미지를 일단 표시(OCR 끝나면 텍스트로 교체됨).
       _dashboard.pushImage(0, topLeftCrop);
+      _cellImageBytes[0] ??= topLeftCrop;
       final topLeftLines = await _ocrLines(topLeftCrop);
       final currentFp = _buildFingerprintLines(topLeftLines, const []);
 
@@ -1070,15 +1160,28 @@ class _ScanScreenState extends State<ScanScreen> {
           currentFp.isNotEmpty &&
           _fingerprintSimilarity(currentFp, _bandPageFingerprint!) <
               _rereadSimThreshold) {
-        // 페이지가 바뀜 → 버퍼 리셋, 이번 캡처를 새 stage-1로 본다.
-        debugPrint("수집 중 페이지 넘김 감지 — 버퍼 리셋, 새 페이지 재시작.");
+        // 페이지가 바뀜 → 진행 중 버퍼를 미확인으로 옮기고 새 페이지로 시작.
+        // 대시보드도 비우고 이 캡처의 좌상단 이미지를 다시 push("같이 찍힌 셀 제외하고 비움").
+        debugPrint("수집 중 페이지 넘김 감지 — 미확인 버퍼로 옮김.");
+        await _demoteToPending();
         _resetBandCollection();
+        _dashboard.reset();
+        _dashboard.pushImage(0, topLeftCrop);
         isStage1 = true;
       }
 
       if (isStage1) {
-        // stage 1: 저장된 페이지와의 재독 검사.
+        // stage 1: 매칭 우선순위 = 미확인 버퍼 → 저장된 페이지(재독) → 새 페이지.
         if (currentFp.length >= _fingerprintLineCount) {
+          // (1) 미확인 버퍼 매칭 — 같은 페이지를 이전에 잠시 본 적 있으면 복원.
+          final pending = _matchPendingPage(currentFp);
+          if (pending != null) {
+            await _restoreFromPending(pending);
+            isStage1 = false; // _bandPageFingerprint 복원됨, 이어서 수집 진행.
+          }
+        }
+        // (2) 미확인 매칭 실패 시 저장된 페이지(재독) 검사.
+        if (isStage1 && currentFp.length >= _fingerprintLineCount) {
           final stored = _matchStoredPage(currentFp);
           if (stored != null) {
             // 데모용: 재독이라 OCR은 생략하지만 셀 이미지 자체는 대시보드에
@@ -1106,6 +1209,10 @@ class _ScanScreenState extends State<ScanScreen> {
             }
             _handleProbeReread(stored);
             _resetBandCollection();
+            // B 케이스: 다음 새 페이지가 들어올 때까지 디버그 패널 8칸을 ●로 유지.
+            // 또한 저장된 페이지의 셀 이미지를 대시보드에 표시(시각화 끊김 방지).
+            await _pushStoredPageToDashboard(stored);
+            if (mounted) setState(() => _rereadShowAllCollected = true);
             if (mounted && _isAutoMode) {
               _lastCaptureAt = DateTime.now();
               _awaitingMotionBeforeNextCapture = true;
@@ -1117,8 +1224,17 @@ class _ScanScreenState extends State<ScanScreen> {
             return;
           }
         }
-        // 새 페이지로 확정.
+        // 새 페이지로 확정 — B 케이스 시각화는 여기서 해제.
+        // 미확인 매칭(isStage1=false)이 아닌 진짜 새 페이지 진입이면 대시보드도
+        // 이전 페이지 잔상을 비우고 이 캡처의 좌상단 이미지로 다시 시작.
+        if (isStage1) {
+          _dashboard.reset();
+          _dashboard.pushImage(0, topLeftCrop);
+        }
         _bandPageFingerprint = currentFp;
+        if (_rereadShowAllCollected && mounted) {
+          setState(() => _rereadShowAllCollected = false);
+        }
       }
 
       // 좌상단 OCR 결과 저장(아직 없거나 비어 있던 자리에 더 풍부한 OCR이면 갱신).
@@ -1151,6 +1267,7 @@ class _ScanScreenState extends State<ScanScreen> {
             right,
           );
           _pendingCellImages[idx] = crop;
+          _cellImageBytes[idx] = crop;
           // 대시보드: 새로 수집된 칸의 이미지를 즉시 표시.
           _dashboard.pushImage(idx, crop);
         }
@@ -1446,22 +1563,53 @@ class _ScanScreenState extends State<ScanScreen> {
     ]);
     final stitchFailed = leftFailed || rightFailed;
 
+    // 페이지 번호 추출용 셀별 데이터 — 1행 좌/우(위쪽 6줄), 4행 좌/우(아래쪽 6줄).
+    // _resetBandCollection 호출 전에 스냅샷을 떠 _commitSpread에 넘긴다.
+    final leftTopCell = _cellLines[0] ?? const <_VisionLine>[];
+    final rightTopCell = _cellLines[1] ?? const <_VisionLine>[];
+    final leftBottomCell = _cellLines[6] ?? const <_VisionLine>[];
+    final rightBottomCell = _cellLines[7] ?? const <_VisionLine>[];
+
+    // 8칸 합쳐진 전체 OCR 텍스트를 대시보드에 push("전체 OCR 보기" 버튼 활성화).
+    // image=null로 보내 이전 페이지의 전체 캡처 사진이 남아 있던 경우를 비운다 — 자동 모드 전환은 하지 않음.
+    final leftText = _cellText(leftMerged);
+    final rightText = _cellText(rightMerged);
+    final full = [leftText, rightText].where((t) => t.trim().isNotEmpty).join('\n\n');
+    if (full.trim().isNotEmpty) {
+      _dashboard.pushFullPage(image: null, text: full);
+    }
+
     _resetBandCollection();
     // 한 페이지 완성 — 다음 페이지로 넘기는 움직임을 기다린다.
     _awaitingMotionBeforeNextCapture = true;
     _stableSince = null;
+    // 8칸 완성 시각화 — 다음 새 페이지가 들어올 때까지 디버그 8칸을 ●로 유지.
+    if (mounted) setState(() => _rereadShowAllCollected = true);
 
-    await _commitSpread(leftMerged, rightMerged, stitchFailed);
+    await _commitSpread(
+      leftMerged,
+      rightMerged,
+      stitchFailed,
+      leftTopCell: leftTopCell,
+      rightTopCell: rightTopCell,
+      leftBottomCell: leftBottomCell,
+      rightBottomCell: rightBottomCell,
+    );
   }
 
   // 슬라이스 1: 조립된 펼침면 한 장을 페이지 저장소에 반영한다.
   // 상단 지문으로 지금까지 읽은 모든 페이지와 비교해 재독이면 중복 저장하지 않고,
-  // 새 페이지면 좌/우 하단에서 페이지 번호를 매겨 보관한다.
+  // 새 페이지면 1행 위 6줄 / 4행 아래 6줄에서 페이지 번호를 매겨 보관한다.
+  // 셀별 데이터(leftTopCell 등)는 페이지 번호 추출에 사용 — 본문 숫자 오검출 최소화.
   Future<void> _commitSpread(
     List<_VisionLine> leftLines,
     List<_VisionLine> rightLines,
-    bool stitchFailed,
-  ) async {
+    bool stitchFailed, {
+    List<_VisionLine> leftTopCell = const [],
+    List<_VisionLine> rightTopCell = const [],
+    List<_VisionLine> leftBottomCell = const [],
+    List<_VisionLine> rightBottomCell = const [],
+  }) async {
     final leftText = leftLines
         .map((l) => l.text.trim())
         .where((t) => t.isNotEmpty)
@@ -1505,6 +1653,14 @@ class _ScanScreenState extends State<ScanScreen> {
         hit.leftText = leftText;
         hit.rightText = rightText;
         hit.quality = quality;
+        // 더 선명한 이미지로 셀 이미지 디스크도 교체.
+        final fresh = await _saveCellImagesToDisk(
+          _cellImageBytes,
+          'page_${hit.rightNumber}',
+        );
+        for (int i = 0; i < fresh.length; i++) {
+          if (fresh[i] != null) hit.cellImagePaths[i] = fresh[i];
+        }
       }
       _advanceAnchor(hit.rightNumber);
       debugPrint(
@@ -1527,11 +1683,22 @@ class _ScanScreenState extends State<ScanScreen> {
       return;
     }
 
-    // 새 페이지 — 좌·우 연속성 + 앵커 + 혼동쌍으로 페이지 번호를 확정한다.
-    final resolved = _resolvePageNumbers(leftLines, rightLines);
+    // 새 페이지 — 1행 위 6줄 / 4행 아래 6줄에서만 페이지 번호 후보 추출(셀별).
+    final resolved = _resolvePageNumbers(
+      leftTopCell,
+      rightTopCell,
+      leftBottomCell,
+      rightBottomCell,
+    );
     final leftNumber = resolved.left;
     final rightNumber = resolved.right;
     final numberConfirmed = resolved.confirmed;
+
+    // 셀 이미지 디스크 저장(B 케이스 시각화에 사용).
+    final savedPaths = await _saveCellImagesToDisk(
+      _cellImageBytes,
+      'page_$rightNumber',
+    );
 
     final page = _StoredPage(
       leftNumber: leftNumber,
@@ -1541,9 +1708,12 @@ class _ScanScreenState extends State<ScanScreen> {
       rightText: rightText,
       topLines: fingerprint,
       quality: quality,
+      cellImagePaths: savedPaths,
     );
     _pageStore.add(page);
     _registerTopLines(fingerprint);
+    // 이 페이지를 가리키는 미확인 버퍼 항목이 있었다면 제거(디스크도 정리).
+    await _evictMatchingPending(fingerprint);
     _advanceAnchor(rightNumber);
     if (mounted) {
       AppStateScope.of(
@@ -1634,31 +1804,31 @@ class _ScanScreenState extends State<ScanScreen> {
     return (_topLineFrequency[line] ?? 0) >= _runningHeaderMinPages;
   }
 
-  // 슬라이스 1(B안 보강): 한 페이지의 하단 줄에서 페이지 번호를 뽑는다.
-  // 페이지 번호는 하단 푸터 줄에 있다 — 책마다 '050'처럼 숫자만 있기도 하고
-  // '228 Chapter'·'레이아웃 관리 229'처럼 장 제목과 한 줄에 섞이기도 한다.
-  // 그래서 ① 본문 문단(어절 많은 긴 줄)과 ② 'N .' 코드 줄번호 줄을 걸러낸 뒤,
-  // 남은 짧은 푸터 줄들의 숫자 중 가장 큰 값을 페이지 번호로 본다. 장·절 번호
-  // (4-3 등)는 작아서 자연히 밀린다. 기대값에 의존하지 않아 페이지 점프에 강하다.
-  // 하단 영역에서 발견된 *모든* 페이지 번호 후보 숫자를 돌려준다(중복 제거·정렬).
-  // 최대값 하나만 뽑던 기존 방식과 달리, 다중 후보를 _resolvePageNumbers가
-  // 연속쌍 검사·앵커 근접도로 가려내게 한다.
-  List<int> _extractBottomPageCandidates(List<_VisionLine> lines) {
+  // 페이지 번호 위치 락 — 'top'(1행 위 6줄) 또는 'bottom'(4행 아래 6줄).
+  // 5회 연속 같은 위치에서 검출되면 락 → 이후 그 위치만 검사. 락 위치에서
+  // 3회 연속 못 찾으면 해제 → 양쪽 다시 검사. 잘못된 락 회복 가능.
+  String? _pageLocationLock;
+  String? _pageLocationVoteFor;
+  int _pageLocationVoteCount = 0;
+  int _pageLocationMissCount = 0;
+  static const int _pageLocationLockVotes = 5;
+  static const int _pageLocationUnlockMisses = 3;
+
+  // 라인 리스트에서 페이지 번호 후보 숫자를 뽑는다(중복 제거·정렬).
+  // 본문 문단(어절 많은 긴 줄)과 'N .' 코드 줄번호 줄은 거른다.
+  List<int> _extractNumberCandidatesFromLines(List<_VisionLine> lines) {
     if (lines.isEmpty) return const [];
-    final bottom = lines.sublist(
-      math.max(0, lines.length - _pageNumberSearchLines),
-    );
-    final codeLineNumber = RegExp(r'^\d{1,3}\s*\.\s*$'); // 'N .' 코드 줄번호
+    final codeLineNumber = RegExp(r'^\d{1,3}\s*\.\s*$');
     final number = RegExp(r'\d{1,4}');
     final cands = <int>{};
-    for (final line in bottom) {
+    for (final line in lines) {
       final text = line.text.trim();
       if (text.isEmpty || codeLineNumber.hasMatch(text)) continue;
       final tokenCount = text
           .split(RegExp(r'\s+'))
           .where((t) => t.isNotEmpty)
           .length;
-      if (tokenCount > _pageNumberMaxTokens) continue; // 본문 문단 줄 제외
+      if (tokenCount > _pageNumberMaxTokens) continue;
       for (final m in number.allMatches(text)) {
         final n = int.parse(m.group(0)!);
         if (n > 0 && n < 10000) cands.add(n);
@@ -1666,6 +1836,69 @@ class _ScanScreenState extends State<ScanScreen> {
     }
     final list = cands.toList()..sort();
     return list;
+  }
+
+  // 페이지의 한 쪽(좌 or 우)에서 페이지 번호 후보를 위치(top/bottom)별로 모은다.
+  // 락이 걸려 있으면 해당 위치만 검사. 결과는 (top후보들, bottom후보들).
+  ({List<int> top, List<int> bottom}) _extractPageCandidatesByLocation(
+    List<_VisionLine> topCell,
+    List<_VisionLine> bottomCell,
+  ) {
+    final topSlice = topCell.length <= _pageNumberSearchLines
+        ? topCell
+        : topCell.sublist(0, _pageNumberSearchLines);
+    final bottomSlice = bottomCell.length <= _pageNumberSearchLines
+        ? bottomCell
+        : bottomCell.sublist(bottomCell.length - _pageNumberSearchLines);
+    final topCands = _pageLocationLock == 'bottom'
+        ? const <int>[]
+        : _extractNumberCandidatesFromLines(topSlice);
+    final bottomCands = _pageLocationLock == 'top'
+        ? const <int>[]
+        : _extractNumberCandidatesFromLines(bottomSlice);
+    return (top: topCands, bottom: bottomCands);
+  }
+
+  // 페이지 번호가 채택된 후, 그 번호가 어느 위치(top/bottom)에서 왔는지에 따라
+  // 락/락해제 상태를 갱신한다.
+  void _updatePageLocationLock(String? observed) {
+    if (observed == null) {
+      // 양쪽 어디서도 못 찾음 — 락 상태면 miss 누적, 해제 임계 도달 시 락 풀기.
+      if (_pageLocationLock != null) {
+        _pageLocationMissCount++;
+        debugPrint(
+          "페이지 번호 위치 락($_pageLocationLock) miss "
+          "$_pageLocationMissCount/$_pageLocationUnlockMisses.",
+        );
+        if (_pageLocationMissCount >= _pageLocationUnlockMisses) {
+          debugPrint("페이지 번호 위치 락 해제 — 양쪽 다시 검사.");
+          _pageLocationLock = null;
+          _pageLocationVoteFor = null;
+          _pageLocationVoteCount = 0;
+          _pageLocationMissCount = 0;
+        }
+      } else {
+        _pageLocationVoteFor = null;
+        _pageLocationVoteCount = 0;
+      }
+      return;
+    }
+    // 검출 성공 — miss 카운트 리셋.
+    _pageLocationMissCount = 0;
+    if (_pageLocationLock != null) {
+      // 락된 상태면 더 할 일 없음(같은 위치에서 계속 찾는 게 정상).
+      return;
+    }
+    if (_pageLocationVoteFor == observed) {
+      _pageLocationVoteCount++;
+    } else {
+      _pageLocationVoteFor = observed;
+      _pageLocationVoteCount = 1;
+    }
+    if (_pageLocationVoteCount >= _pageLocationLockVotes) {
+      _pageLocationLock = observed;
+      debugPrint("페이지 번호 위치 락 — $observed (연속 $_pageLocationVoteCount회).");
+    }
   }
 
   // ── 페이지 번호 확정 ──────────────────────────────────────────────
@@ -1788,18 +2021,27 @@ class _ScanScreenState extends State<ScanScreen> {
 
   // 한 펼침면의 좌·우 페이지 번호를 확정한다.
   // confirmed=false면 OCR을 그대로 안 쓰고 앵커/추정으로 폴백한 결과다.
+  // 셀별 데이터: 1행 좌/우(위쪽 6줄), 4행 좌/우(아래쪽 6줄)에서만 후보를 모은다.
   ({int left, int right, bool confirmed}) _resolvePageNumbers(
-    List<_VisionLine> leftLines,
-    List<_VisionLine> rightLines,
+    List<_VisionLine> leftTopCell,
+    List<_VisionLine> rightTopCell,
+    List<_VisionLine> leftBottomCell,
+    List<_VisionLine> rightBottomCell,
   ) {
-    final leftCands = _extractBottomPageCandidates(leftLines);
-    final rightCands = _extractBottomPageCandidates(rightLines);
+    final leftLoc = _extractPageCandidatesByLocation(
+      leftTopCell, leftBottomCell);
+    final rightLoc = _extractPageCandidatesByLocation(
+      rightTopCell, rightBottomCell);
+    final leftCands = [...leftLoc.top, ...leftLoc.bottom];
+    final rightCands = [...rightLoc.top, ...rightLoc.bottom];
     final all = ({...leftCands, ...rightCands}).toList()..sort();
     final anchor = _lastCommittedRight;
 
     debugPrint(
-      "페이지 번호 후보 좌=$leftCands 우=$rightCands "
-      "(합=$all, 앵커=${anchor ?? '-'})",
+      "페이지 번호 후보 — 락=${_pageLocationLock ?? '없음'} "
+      "좌(top=${leftLoc.top}, bot=${leftLoc.bottom}) "
+      "우(top=${rightLoc.top}, bot=${rightLoc.bottom}) "
+      "합=$all 앵커=${anchor ?? '-'}",
     );
 
     final result = _decidePageNumbers(leftCands, rightCands, all, anchor);
@@ -1809,9 +2051,31 @@ class _ScanScreenState extends State<ScanScreen> {
       _learnParity(result.left);
     }
 
+    // 위치 락 갱신 — 채택된 페이지 번호가 어디서 왔는지 추적.
+    String? observed;
+    if (result.confirmed) {
+      final picked = {result.left, result.right};
+      final topAll = {...leftLoc.top, ...rightLoc.top};
+      final botAll = {...leftLoc.bottom, ...rightLoc.bottom};
+      final fromTop = picked.intersection(topAll).isNotEmpty;
+      final fromBot = picked.intersection(botAll).isNotEmpty;
+      if (fromTop && !fromBot) {
+        observed = 'top';
+      } else if (fromBot && !fromTop) {
+        observed = 'bottom';
+      }
+      // 양쪽 다면 모호 → 투표 안 함(observed=null이지만 confirmed라 miss 아님).
+    }
+    if (result.confirmed) {
+      if (observed != null) _updatePageLocationLock(observed);
+      // 양쪽 검출 모호한 confirmed 케이스는 락 상태 변경 없음.
+    } else {
+      _updatePageLocationLock(null);
+    }
+
     debugPrint(
       "페이지 번호 확정: ${result.left}·${result.right} "
-      "(confirmed=${result.confirmed})",
+      "(confirmed=${result.confirmed}, 위치=$observed)",
     );
     return result;
   }
@@ -2488,7 +2752,8 @@ class _StoredPage {
     required this.rightText,
     required this.topLines,
     required this.quality,
-  });
+    List<String?>? cellImagePaths,
+  }) : cellImagePaths = cellImagePaths ?? List<String?>.filled(8, null);
 
   final int leftNumber;
   final int rightNumber;
@@ -2497,6 +2762,9 @@ class _StoredPage {
   String rightText; // 오른쪽 페이지 본문 — 재독 시 교체될 수 있음
   final List<String> topLines; // 좌/우 상단 줄(정규화) — 재독 지문
   int quality; // OCR 품질 점수 — 재독 교체 판단
+  // 8셀 이미지의 디스크 경로(row*2+col). null이면 그 칸은 저장된 이미지 없음.
+  // B 케이스(재독) 시 대시보드가 이 경로로 셀 이미지를 다시 보여준다.
+  final List<String?> cellImagePaths;
 
   // 분석용 평문 — 좌·우 페이지 본문을 합친다.
   String get text =>
@@ -2510,19 +2778,48 @@ class _StoredPage {
     'rightText': rightText,
     'topLines': topLines,
     'quality': quality,
+    'cellImagePaths': cellImagePaths,
   };
 
-  static _StoredPage fromJson(Map<String, dynamic> json) => _StoredPage(
-    leftNumber: (json['leftNumber'] as num?)?.toInt() ?? 0,
-    rightNumber: (json['rightNumber'] as num?)?.toInt() ?? 0,
-    numberConfirmed: json['numberConfirmed'] as bool? ?? false,
-    leftText: json['leftText'] as String? ?? '',
-    rightText: json['rightText'] as String? ?? '',
-    topLines: ((json['topLines'] as List?) ?? const [])
-        .map((e) => e.toString())
-        .toList(),
-    quality: (json['quality'] as num?)?.toInt() ?? 0,
-  );
+  static _StoredPage fromJson(Map<String, dynamic> json) {
+    final paths = List<String?>.filled(8, null);
+    final raw = (json['cellImagePaths'] as List?) ?? const [];
+    for (int i = 0; i < raw.length && i < 8; i++) {
+      paths[i] = raw[i] as String?;
+    }
+    return _StoredPage(
+      leftNumber: (json['leftNumber'] as num?)?.toInt() ?? 0,
+      rightNumber: (json['rightNumber'] as num?)?.toInt() ?? 0,
+      numberConfirmed: json['numberConfirmed'] as bool? ?? false,
+      leftText: json['leftText'] as String? ?? '',
+      rightText: json['rightText'] as String? ?? '',
+      topLines: ((json['topLines'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(),
+      quality: (json['quality'] as num?)?.toInt() ?? 0,
+      cellImagePaths: paths,
+    );
+  }
+}
+
+// 8칸 수집 도중이지만 아직 한 페이지로 commit되지 못한 임시 페이지.
+// 페이지 넘김 false-negative 회복 + 촬영 중지/재시작 보존을 위해 보관한다.
+// 디스크에 셀 이미지를 저장하고 경로만 메모리에 들고 있다가, 매칭되면 복원.
+class _PendingPage {
+  _PendingPage({
+    required this.id,
+    required this.fingerprint,
+    required this.cellLines,
+    required this.cellImagePaths,
+    required this.createdAt,
+  });
+
+  final String id; // 디렉토리 이름(예: 'pending_1700000000000')
+  final List<String> fingerprint; // 페이지 ID = 좌상단 지문
+  // OCR 완료된 셀(null이면 미완 — 복원 후 다음 캡처에서 채워짐)
+  final List<List<_VisionLine>?> cellLines;
+  final List<String?> cellImagePaths; // 디스크 경로(B 케이스 시각화)
+  final DateTime createdAt;
 }
 
 /// 명령 3 스티칭: 겹침 앵커 위치 — 앞 누적의 tailIndex, 다음 세그먼트의 headIndex.
